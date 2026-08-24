@@ -1,4 +1,8 @@
 import binance.client
+from binance_tracker.util import patch_binance_client
+
+# Make the official python-binance client usable through Binance IPs on Win10.
+patch_binance_client()
 from decimal import Decimal
 import sys;'qgb.U' in sys.modules or sys.path.append('/home/qgb/')
 from qgb import py,U,T,N,F

@@ -21,5 +21,14 @@ export BINANCE_WS_PROXY=http://127.0.0.1:7890
 
 日志位于 `logs/`。每个标的都有独立的 `calibration_<SYMBOL>.log`，记录校准开始、完成、字段级 live/rest 差异和异常；公共日志包括 `app.log`、`network.log`、`calibration.log`、`error.log`。
 
+Windows 上使用官方 `python-binance` 客户端时，先导入 `B` 即可安装 IP 直连补丁；它会读取 `config.py` 的 `REST_IPS`，选择最低延迟地址，并自动设置 `Host: api.binance.com`：
+
+```python
+import binance
+import B
+
+r = B.set_client(binance.client.Client(api_key, api_secret))
+```
+
 
 代码接口示例：`tracker.add_symbols("BTCUSDT", "ETHUSDT")`、`tracker.remove_symbols("ETHUSDT")`、`tracker.get_snapshot("BTCUSDT", "1m")`。通过 `tracker.subscribed_symbols` 可查看当前订阅。运行中每笔成交会在控制台输出该标的一行价格和所有周期 Boll 数值。
