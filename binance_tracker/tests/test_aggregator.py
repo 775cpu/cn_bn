@@ -41,11 +41,11 @@ def test_bollinger_is_calculated_from_latest_closes():
     assert round(boll["lower"], 6) == 0
 
 
-def test_calibration_does_not_rewind_active_bar():
+def test_mismatch_does_not_rewind_active_bar():
     book = SymbolBook("BTCUSDT", ("1m",), boll_period=2)
     book.update_trade(100, 1, 60_000)
     rest = [Kline(0, 90, 110, 80, 100, 20, 2000, 10, True), Kline(60_000, 99, 105, 95, 99, 9, 891, 9, False)]
-    book.merge_calibration("1m", rest)
+    book.merge_mismatch("1m", rest)
     latest = book.snapshot("1m", 1)[0]
     assert latest["open_time"] == 60_000
     assert latest["close"] == 100

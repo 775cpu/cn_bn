@@ -9,7 +9,7 @@ class SymbolBook:
         self.symbol = symbol.upper()
         self.intervals = intervals
         self._bars = {interval: deque(maxlen=maxlen) for interval in intervals}
-        self.period, self.deviations = boll_period, boll_stddev
+        self.boll_period, self.boll_stddev = boll_period, boll_stddev
 
     def _new_bar(self, interval: str, open_time: int, price: float) -> Kline:
         return Kline(open_time, price, price, price, price)
@@ -42,8 +42,8 @@ class SymbolBook:
     def _update_latest_boll(self, interval: str) -> None:
         bars = self._bars[interval]
         if bars:
-            closes = [item.close for item in list(bars)[-self.period:]]
-            bars[-1].upper, bars[-1].middle, bars[-1].lower = bollinger(closes, self.period, self.deviations)
+            closes = [item.close for item in list(bars)[-self.boll_period:]]
+            bars[-1].upper, bars[-1].middle, bars[-1].lower = bollinger(closes, self.boll_period, self.boll_stddev)
 
     def update_trade(self, price: float, quantity: float, timestamp_ms: int, quote_quantity: float = 0.0) -> None:
         for interval in self.intervals:
@@ -65,8 +65,8 @@ class SymbolBook:
             bar.volume += quantity
             bar.quote_volume += quote_quantity
             bar.trades += 1
-            closes = [item.close for item in list(bars)[-self.period:]]
-            bar.upper, bar.middle, bar.lower = bollinger(closes, self.period, self.deviations)
+            closes = [item.close for item in list(bars)[-self.boll_period:]]
+            bar.upper, bar.middle, bar.lower = bollinger(closes, self.boll_period, self.boll_stddev)
 
     def advance(self, timestamp_ms: int) -> None:
         for interval in self.intervals:
@@ -79,9 +79,9 @@ class SymbolBook:
         closes: list[float] = []
         for bar in self._bars[interval]:
             closes.append(bar.close)
-            bar.upper, bar.middle, bar.lower = bollinger(closes, self.period, self.deviations)
+            bar.upper, bar.middle, bar.lower = bollinger(closes, self.boll_period, self.boll_stddev)
 
-    def merge_calibration(self, interval: str, klines: list[Kline]) -> None:
+    def merge_mismatch(self, interval: str, klines: list[Kline]) -> None:
         """Replace closed history while retaining the locally newer active bar."""
         current = self._bars[interval][-1] if self._bars[interval] else None
         active = current if current and not current.closed else None

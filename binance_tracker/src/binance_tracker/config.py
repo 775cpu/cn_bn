@@ -24,7 +24,7 @@ class Settings:
     ip_switch_min_ratio: float = 0.20
     network_mode: str = "domain"
     verify_ssl: bool = field(default_factory=lambda: os.getenv("BINANCE_VERIFY_SSL", "1") != "0")
-    calibration_seconds: int = 300
+    mismatch_check_seconds: int = 300
     history_limit: int = 200
     boll_period: int = 20
     boll_stddev: float = 2.0
@@ -49,7 +49,7 @@ class Settings:
             direct_ip=data.get("DIRECT_IP") or None, direct_ws_ip=data.get("DIRECT_WS_IP") or None,
             direct_ips=tuple(data.get("DIRECT_IPS", base.direct_ips)), ip_select_seconds=int(data.get("IP_SELECT_SECONDS", base.ip_select_seconds)), ip_ping_timeout=float(data.get("IP_PING_TIMEOUT", base.ip_ping_timeout)),
             rest_ips=tuple(data.get("REST_IPS", base.rest_ips)), ws_ips=tuple(data.get("WS_IPS", base.ws_ips)), ip_switch_min_ms=float(data.get("IP_SWITCH_MIN_MS", base.ip_switch_min_ms)), ip_switch_min_ratio=float(data.get("IP_SWITCH_MIN_RATIO", base.ip_switch_min_ratio)), network_mode=str(data.get("NETWORK_MODE", base.network_mode)),
-            verify_ssl=bool(data.get("VERIFY_SSL", base.verify_ssl)), calibration_seconds=int(data.get("CALIBRATION_SECONDS", base.calibration_seconds)),
+            verify_ssl=bool(data.get("VERIFY_SSL", base.verify_ssl)), mismatch_check_seconds=int(data.get("MISMATCH_CHECK_SECONDS", base.mismatch_check_seconds)),
             history_limit=int(data.get("HISTORY_LIMIT", base.history_limit)), boll_period=int(data.get("BOLL_PERIOD", base.boll_period)),
             boll_stddev=float(data.get("BOLL_STDDEV", base.boll_stddev)), intervals=tuple(data.get("INTERVALS", base.intervals)),
             log_dir=data.get("LOG_DIR", base.log_dir), log_max_bytes=int(data.get("LOG_MAX_BYTES", base.log_max_bytes)),

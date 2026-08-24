@@ -7,11 +7,11 @@ import aiohttp
 from .aggregator import SymbolBook
 from .client import BinanceClient
 from .config import Settings
-from .logging_setup import setup_symbol_calibration_logging
+from .logging_setup import setup_symbol_mismatch_logging
 from .display import TerminalDisplay
 
 app_log = logging.getLogger("app")
-calibration_log = logging.getLogger("calibration")
+mismatch_log = logging.getLogger("mismatch")
 error_log = logging.getLogger("error")
 
 class BinanceTracker:
@@ -78,8 +78,8 @@ class BinanceTracker:
             else:
                 print("[网络] 使用域名直连", flush=True)
             self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop()), asyncio.create_task(self._ip_selection_loop())]
-            await asyncio.gather(*(self._calibrate_symbol(symbol) for symbol in tuple(self._symbols)))
-            self._tasks.append(asyncio.create_task(self._calibration_loop()))
+            await asyncio.gather(*(self._check_mismatch_symbol(symbol) for symbol in tuple(self._symbols)))
+            self._tasks.append(asyncio.create_task(self._mismatch_loop()))
             print("[启动] 初始校准完成，正在接收实时数据", flush=True)
         except Exception:
             await self._client.__aexit__(None, None, None)
@@ -98,12 +98,10 @@ class BinanceTracker:
             await self._client.__aexit__(None, None, None)
             self._client = None
 
-    async def _calibrate_symbol(self, symbol: str) -> None:
+    async def _check_mismatch_symbol(self, symbol: str) -> None:
         assert self._client is not None
         book = self.books[symbol]
-        symbol_log = setup_symbol_calibration_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
-        symbol_log.info("calibration started intervals=%s", ",".join(self.settings.intervals))
-        print(f"[校准] {symbol} 开始，共 {len(self.settings.intervals)} 个周期", flush=True)
+        symbol_log = setup_symbol_mismatch_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
         for interval in self.settings.intervals:
             try:
                 incoming = await self._client.klines(symbol, interval, self.settings.history_limit)
@@ -121,21 +119,17 @@ class BinanceTracker:
                             message = "mismatch interval=%s open_time=%d closed=%s fields=%s live=%s rest=%s"
                             values = (interval, bar.open_time, bar.closed, differences, prior.as_dict(), bar.as_dict())
                             symbol_log.error(message, *values)
-                book.merge_calibration(interval, incoming)
-                app_log.info("calibration symbol=%s interval=%s rows=%d", symbol, interval, len(incoming))
-                symbol_log.info("calibration completed interval=%s rows=%d", interval, len(incoming))
-                print(f"[校准] {symbol} {interval} 完成 rows={len(incoming)}", flush=True)
+                book.merge_mismatch(interval, incoming)
             except Exception:
-                symbol_log.exception("calibration failed interval=%s", interval)
-                error_log.exception("calibration failed symbol=%s interval=%s", symbol, interval)
-                print(f"[校准] {symbol} {interval} 失败，详情见 calibration_{symbol}.log", flush=True)
+                symbol_log.exception("mismatch check failed interval=%s", interval)
+                error_log.exception("mismatch check failed symbol=%s interval=%s", symbol, interval)
 
-    async def _calibration_loop(self) -> None:
+    async def _mismatch_loop(self) -> None:
         while not self._stop.is_set():
             for symbol in tuple(self._symbols):
-                await self._calibrate_symbol(symbol)
+                await self._check_mismatch_symbol(symbol)
             try:
-                await asyncio.wait_for(self._stop.wait(), self.settings.calibration_seconds)
+                await asyncio.wait_for(self._stop.wait(), self.settings.mismatch_check_seconds)
             except asyncio.TimeoutError:
                 pass
 

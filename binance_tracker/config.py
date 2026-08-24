@@ -21,7 +21,7 @@ IP_SWITCH_MIN_RATIO = 0.20
 # 数据与指标。
 INTERVALS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 HISTORY_LIMIT = 200
-CALIBRATION_SECONDS = 300
+MISMATCH_CHECK_SECONDS = 300
 BOLL_PERIOD = 21
 BOLL_STDDEV = 3
 
