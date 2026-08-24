@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import time
 import threading
 import aiohttp
@@ -63,13 +64,20 @@ class BinanceTracker:
     async def start(self) -> None:
         if self._client is not None:
             return
-        self._client = BinanceClient(self.settings.rest_url, self.settings.ws_url, self.settings.http_proxy, self.settings.ws_proxy, self.settings.direct_ip, self.settings.direct_ws_ip, self.settings.verify_ssl)
+        self._client = BinanceClient(self.settings.rest_url, self.settings.ws_url, self.settings.http_proxy, self.settings.ws_proxy, self.settings.direct_ip, self.settings.direct_ws_ip, self.settings.verify_ssl, self.settings.direct_ips, self.settings.ip_ping_timeout, self.settings.rest_ips, self.settings.ws_ips, self.settings.ip_switch_min_ms, self.settings.ip_switch_min_ratio)
         self._loop = asyncio.get_running_loop()
-        await self._client.__aenter__()
-        self._stop.clear()
-        self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop())]
-        await asyncio.gather(*(self._calibrate_symbol(symbol) for symbol in tuple(self._symbols)))
-        self._tasks.append(asyncio.create_task(self._calibration_loop()))
+        try:
+            await self._client.__aenter__()
+            self._stop.clear()
+            if self._client.rest_ips or self._client.ws_ips:
+                await self._client.select_best_ip()
+            self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop()), asyncio.create_task(self._ip_selection_loop())]
+            await asyncio.gather(*(self._calibrate_symbol(symbol) for symbol in tuple(self._symbols)))
+            self._tasks.append(asyncio.create_task(self._calibration_loop()))
+        except Exception:
+            await self._client.__aexit__(None, None, None)
+            self._client = None
+            raise
 
     async def stop(self) -> None:
         self._stop.set()
@@ -95,15 +103,16 @@ class BinanceTracker:
                 for bar in incoming:
                     prior = old.get(bar.open_time)
                     if prior and prior.closed and bar.closed:
-                        fields = ("open", "high", "low", "close", "volume", "quote_volume", "trades")
-                        differences = {field: {"live": getattr(prior, field), "rest": getattr(bar, field)} for field in fields if getattr(prior, field) != getattr(bar, field)}
+                        fields = ("open", "high", "low", "close", "volume", "quote_volume")
+                        differences = {
+                            field: {"live": getattr(prior, field), "rest": getattr(bar, field)}
+                            for field in fields
+                            if not math.isclose(getattr(prior, field), getattr(bar, field), rel_tol=1e-12, abs_tol=1e-8)
+                        }
                         if differences:
                             message = "mismatch interval=%s open_time=%d closed=%s fields=%s live=%s rest=%s"
                             values = (interval, bar.open_time, bar.closed, differences, prior.as_dict(), bar.as_dict())
-                            if bar.closed:
-                                symbol_log.error(message, *values)
-                            else:
-                                symbol_log.warning("active_candle_drift " + message, *values)
+                            symbol_log.error(message, *values)
                 book.merge_calibration(interval, incoming)
                 app_log.info("calibration symbol=%s interval=%s rows=%d", symbol, interval, len(incoming))
                 symbol_log.info("calibration completed interval=%s rows=%d", interval, len(incoming))
@@ -130,6 +139,20 @@ class BinanceTracker:
             except asyncio.TimeoutError:
                 pass
 
+    async def _ip_selection_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), self.settings.ip_select_seconds)
+            except asyncio.TimeoutError:
+                if self._client and (self._client.rest_ips or self._client.ws_ips):
+                    try:
+                        changed = await self._client.select_best_ip()
+                        if changed:
+                            self._changed.set()
+                            app_log.info("Binance IP changed REST=%s WS=%s; reconnecting WebSocket", self._client.current_rest_ip, self._client.current_ws_ip)
+                    except Exception:
+                        error_log.exception("periodic Binance IP selection failed")
+
     async def _stream_loop(self) -> None:
         while not self._stop.is_set():
             symbols = set(self._symbols)
@@ -140,9 +163,12 @@ class BinanceTracker:
             ws = None
             try:
                 assert self._client is not None
+                self._changed.clear()
                 ws = await self._client.stream(symbols)
                 app_log.info("WebSocket connected symbols=%s", sorted(symbols))
                 while symbols == self._symbols and not self._stop.is_set():
+                    if self._changed.is_set():
+                        break
                     try:
                         message = await ws.receive(timeout=5)
                     except asyncio.TimeoutError:

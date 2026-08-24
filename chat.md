@@ -62,3 +62,37 @@ binance_tracker/ 补齐  .gitignore  和git提交自动 CI 测试工作流。 �
 ## 5. Python 配置和 Bollinger 详细显示
 
 配置文件用 py 代码格式。不要toml 和json  06:35:00 BTCUSDT      price=77280.00000000 breakout=3d=UP 显示boll 详细数值
+
+## 6. 多 IP 延迟切换、启动模式和对话记录
+
+延迟选最优；定时重测后若最优 IP 变化，主动打断当前 【只有延迟 差异足够大 ，才去打断 】 并且把最新历史对话总结追加到chat md 。DIRECT_IP list 可以在py中定义，但是 "%PY_PATH%" -m binance_tracker.main %* 要体现选择ip模式啊。【而且 ws 和 rest ip 不同，配置文件 有吗？】  sh 选择直连模式
+
+### 本轮需求总结
+
+- 多个 IP 并行测速，选择延迟最低的地址。
+- 定时重新测速，但只有新地址相对当前地址的延迟改善足够大时，才中断现有连接并切换。
+- REST 和 WebSocket 使用独立的 IP 列表，并在 Python 配置文件中配置。
+- 启动命令和 `sh` 脚本要明确体现直连 IP 模式。
+- Windows 启动命令继续使用 `%PY_PATH% -m binance_tracker.main`，同时传递直连模式参数。
+
+## 7. 启动脚本模式最终确认
+
+这是严格的启动模式要求，后续以最新消息为准：
+
+- `sh` 是 Binance 域名直连。
+- `bat` 是使用 Python 配置文件中的 IP。
+- `sh` 不应强制传入 `--network-mode direct`，应使用域名直连模式。
+- `bat` 不应强制覆盖配置文件中的网络模式，应直接读取 `config.py` 中的 IP 配置。
+- 将最新几轮历史对话总结合并后追加到 `chat.md`。
+
+## 8. TLS 默认值和冗余配置清理
+
+域名直连，默认开启 VERIFY_SSL， ip连接，默认关闭。 阅读所有代码，有没有需要清理 的地方  。DIRECT_IP = None
+DIRECT_WS_IP = None  这个有什么作用？
+
+### 本轮需求总结
+
+- 域名直连默认 `VERIFY_SSL = True`。
+- IP 直连默认关闭 TLS 证书校验。
+- 检查全部项目代码并清理不再需要的配置。
+- 说明或清理 `DIRECT_IP`、`DIRECT_WS_IP`；当前多 IP 配置应使用 `REST_IPS` 和 `WS_IPS`，单 IP 参数仅作为 CLI 临时覆盖。

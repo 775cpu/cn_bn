@@ -9,6 +9,7 @@ class Kline:
     close: float
     volume: float = 0.0
     quote_volume: float = 0.0
+    # Local aggTrade event count; REST trades is individual trade count and is not comparable.
     trades: int = 0
     closed: bool = False
     middle: float | None = None
