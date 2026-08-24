@@ -1,0 +1,32 @@
+2026-08-24 07:49:18,777 INFO calibration.BNBUSDT: calibration started intervals=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
+2026-08-24 07:49:19,017 INFO calibration.BNBUSDT: calibration completed interval=1m rows=200
+2026-08-24 07:49:19,106 INFO calibration.BNBUSDT: calibration completed interval=3m rows=200
+2026-08-24 07:49:19,195 INFO calibration.BNBUSDT: calibration completed interval=5m rows=200
+2026-08-24 07:49:19,284 INFO calibration.BNBUSDT: calibration completed interval=15m rows=200
+2026-08-24 07:49:19,374 INFO calibration.BNBUSDT: calibration completed interval=30m rows=200
+2026-08-24 07:49:19,463 INFO calibration.BNBUSDT: calibration completed interval=1h rows=200
+2026-08-24 07:49:19,554 INFO calibration.BNBUSDT: calibration completed interval=2h rows=200
+2026-08-24 07:49:19,646 INFO calibration.BNBUSDT: calibration completed interval=4h rows=200
+2026-08-24 07:49:19,739 INFO calibration.BNBUSDT: calibration completed interval=6h rows=200
+2026-08-24 07:49:19,833 INFO calibration.BNBUSDT: calibration completed interval=8h rows=200
+2026-08-24 07:49:19,927 INFO calibration.BNBUSDT: calibration completed interval=12h rows=200
+2026-08-24 07:49:20,018 INFO calibration.BNBUSDT: calibration completed interval=1d rows=200
+2026-08-24 07:49:20,111 INFO calibration.BNBUSDT: calibration completed interval=3d rows=200
+2026-08-24 07:49:20,197 INFO calibration.BNBUSDT: calibration completed interval=1w rows=200
+2026-08-24 07:49:20,283 INFO calibration.BNBUSDT: calibration completed interval=1M rows=106
+2026-08-24 07:49:21,629 INFO calibration.BNBUSDT: calibration started intervals=1m,3m,5m,15m,30m,1h,2h,4h,6h,8h,12h,1d,3d,1w,1M
+2026-08-24 07:49:21,720 INFO calibration.BNBUSDT: calibration completed interval=1m rows=200
+2026-08-24 07:49:21,805 INFO calibration.BNBUSDT: calibration completed interval=3m rows=200
+2026-08-24 07:49:21,895 INFO calibration.BNBUSDT: calibration completed interval=5m rows=200
+2026-08-24 07:49:21,980 INFO calibration.BNBUSDT: calibration completed interval=15m rows=200
+2026-08-24 07:49:22,069 INFO calibration.BNBUSDT: calibration completed interval=30m rows=200
+2026-08-24 07:49:22,154 INFO calibration.BNBUSDT: calibration completed interval=1h rows=200
+2026-08-24 07:49:22,244 INFO calibration.BNBUSDT: calibration completed interval=2h rows=200
+2026-08-24 07:49:22,330 INFO calibration.BNBUSDT: calibration completed interval=4h rows=200
+2026-08-24 07:49:22,422 INFO calibration.BNBUSDT: calibration completed interval=6h rows=200
+2026-08-24 07:49:22,508 INFO calibration.BNBUSDT: calibration completed interval=8h rows=200
+2026-08-24 07:49:22,599 INFO calibration.BNBUSDT: calibration completed interval=12h rows=200
+2026-08-24 07:49:22,685 INFO calibration.BNBUSDT: calibration completed interval=1d rows=200
+2026-08-24 07:49:22,777 INFO calibration.BNBUSDT: calibration completed interval=3d rows=200
+2026-08-24 07:49:22,863 INFO calibration.BNBUSDT: calibration completed interval=1w rows=200
+2026-08-24 07:49:22,950 INFO calibration.BNBUSDT: calibration completed interval=1M rows=106

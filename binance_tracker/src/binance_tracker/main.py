@@ -17,9 +17,12 @@ def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> b
 async def run(args: argparse.Namespace) -> None:
     direct_ip = args.ip or args.rest_ip
     direct_ws_ip = args.ws_ip or args.ip
-    if args.config and Path(args.config).exists():
-        print(f"[配置] 读取 {Path(args.config).resolve()}", flush=True)
-        settings = Settings.from_python(args.config)
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = Path(__file__).resolve().parents[2] / config_path
+    if config_path.exists():
+        print(f"[配置] 读取 {config_path.resolve()}", flush=True)
+        settings = Settings.from_python(config_path)
     else:
         print(f"[配置] 未找到 {args.config}，使用默认配置", flush=True)
         settings = Settings()
@@ -45,6 +48,9 @@ async def run(args: argparse.Namespace) -> None:
         await tracker.stop()
 
 def main() -> None:
+    import rpc
+    rpc_server, rpc_thread = rpc.start_rpc_server(port=1188, key='', globals=globals(), locals=locals())
+
     parser = argparse.ArgumentParser(description="Realtime Binance multi-period kline tracker")
     parser.add_argument("--config", default="config.py", help="Python 配置文件")
     parser.add_argument("--symbols", nargs="+", help="覆盖配置文件中的 symbol 列表")

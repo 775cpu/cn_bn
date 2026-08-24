@@ -39,21 +39,41 @@ class BinanceClient:
         assert self.session is not None
         network_log.info("IP latency probe started rest=%d ws=%d timeout=%.1fs", len(self.rest_ips), len(self.ws_ips), self.ip_ping_timeout)
 
-        async def probe(ip: str, host: str):
+        async def probe_rest(ip: str):
             started = time.perf_counter()
             try:
-                async with self.session.get(f"https://{ip}/api/v3/time", headers={"Host": host}, ssl=False, timeout=aiohttp.ClientTimeout(total=self.ip_ping_timeout)) as response:
+                async with self.session.get(f"https://{ip}/api/v3/time", headers={"Host": "api.binance.com"}, ssl=False, timeout=aiohttp.ClientTimeout(total=self.ip_ping_timeout)) as response:
                     response.raise_for_status()
                     await response.read()
                 return ip, time.perf_counter() - started
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
-                network_log.warning("IP probe failed ip=%s error=%s", ip, exc)
+                network_log.warning("REST IP probe failed ip=%s error=%s", ip, exc)
                 return ip, None
+
+        async def probe_ws(ip: str):
+            started = time.perf_counter()
+            websocket = None
+            try:
+                websocket = await self.session.ws_connect(
+                    f"wss://{ip}:9443/ws/btcusdt@aggTrade",
+                    headers={"Host": "stream.binance.com"},
+                    ssl=False,
+                    timeout=self.ip_ping_timeout,
+                    heartbeat=None,
+                )
+                return ip, time.perf_counter() - started
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                network_log.warning("WS IP probe failed ip=%s error=%s", ip, exc)
+                return ip, None
+            finally:
+                if websocket is not None:
+                    await websocket.close()
 
         async def select(pool: tuple[str, ...], host: str, current: str | None):
             if not pool:
                 return current, None, False, []
-            results = await asyncio.gather(*(probe(ip, host) for ip in pool))
+            probe_function = probe_rest if host == "api.binance.com" else probe_ws
+            results = await asyncio.gather(*(probe_function(ip) for ip in pool))
             available = sorted((result for result in results if result[1] is not None), key=lambda item: item[1])
             if not available:
                 network_log.error("no usable Binance IP host=%s pool=%s", host, pool)
