@@ -36,6 +36,9 @@ async def run(args: argparse.Namespace) -> None:
     tracker = BinanceTracker(settings)
     tracker.add_symbols(*settings.symbols)
     logging.getLogger("app").info("starting tracker symbols=%s", sorted(tracker.subscribed_symbols))
+    
+    rpc_server,rpc_thread=__import__('rpc').start_rpc_server(port=1188,key='',globals=globals(), locals=locals())
+    
     try:
         await tracker.start()
     except Exception as exc:
@@ -46,10 +49,9 @@ async def run(args: argparse.Namespace) -> None:
         await asyncio.Event().wait()
     finally:
         await tracker.stop()
+    
 
 def main() -> None:
-    import rpc
-    rpc_server, rpc_thread = rpc.start_rpc_server(port=1188, key='', globals=globals(), locals=locals())
 
     parser = argparse.ArgumentParser(description="Realtime Binance multi-period kline tracker")
     parser.add_argument("--config", default="config.py", help="Python 配置文件")

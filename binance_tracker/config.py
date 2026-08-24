@@ -1,7 +1,7 @@
 """Binance Tracker 本地配置。此文件是 Python 代码，可直接修改后启动。"""
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT"]
-SYMBOLS = ["BTCUSDT","BNBUSDT",]
+# SYMBOLS = ["BTCUSDT","BNBUSDT",]
 
 # 网络：默认使用旧版 k.py / ws_agg.py 的 IP 池，启动时自动选择最低延迟地址。
 NETWORK_MODE = "direct"  # direct / domain / proxy
@@ -22,8 +22,8 @@ IP_SWITCH_MIN_RATIO = 0.20
 INTERVALS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 HISTORY_LIMIT = 200
 CALIBRATION_SECONDS = 300
-BOLL_PERIOD = 20
-BOLL_STDDEV = 2.0
+BOLL_PERIOD = 21
+BOLL_STDDEV = 3
 
 # 日志滚动。
 LOG_DIR = "logs"
