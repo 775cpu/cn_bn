@@ -69,11 +69,18 @@ class BinanceTracker:
         try:
             await self._client.__aenter__()
             self._stop.clear()
+            print(f"[启动] symbols={','.join(sorted(self._symbols))}", flush=True)
+            print(f"[启动] network_mode={self.settings.network_mode} ssl_verify={self.settings.verify_ssl}", flush=True)
             if self._client.rest_ips or self._client.ws_ips:
+                print(f"[网络] 正在测速 REST={len(self._client.rest_ips)} 个 IP, WS={len(self._client.ws_ips)} 个 IP ...", flush=True)
                 await self._client.select_best_ip()
+                print(f"[网络] 当前 REST={self._client.current_rest_ip or 'domain'} WS={self._client.current_ws_ip or 'domain'}", flush=True)
+            else:
+                print("[网络] 使用域名直连", flush=True)
             self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop()), asyncio.create_task(self._ip_selection_loop())]
             await asyncio.gather(*(self._calibrate_symbol(symbol) for symbol in tuple(self._symbols)))
             self._tasks.append(asyncio.create_task(self._calibration_loop()))
+            print("[启动] 初始校准完成，正在接收实时数据", flush=True)
         except Exception:
             await self._client.__aexit__(None, None, None)
             self._client = None
@@ -96,6 +103,7 @@ class BinanceTracker:
         book = self.books[symbol]
         symbol_log = setup_symbol_calibration_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
         symbol_log.info("calibration started intervals=%s", ",".join(self.settings.intervals))
+        print(f"[校准] {symbol} 开始，共 {len(self.settings.intervals)} 个周期", flush=True)
         for interval in self.settings.intervals:
             try:
                 incoming = await self._client.klines(symbol, interval, self.settings.history_limit)
@@ -116,9 +124,11 @@ class BinanceTracker:
                 book.merge_calibration(interval, incoming)
                 app_log.info("calibration symbol=%s interval=%s rows=%d", symbol, interval, len(incoming))
                 symbol_log.info("calibration completed interval=%s rows=%d", interval, len(incoming))
+                print(f"[校准] {symbol} {interval} 完成 rows={len(incoming)}", flush=True)
             except Exception:
                 symbol_log.exception("calibration failed interval=%s", interval)
                 error_log.exception("calibration failed symbol=%s interval=%s", symbol, interval)
+                print(f"[校准] {symbol} {interval} 失败，详情见 calibration_{symbol}.log", flush=True)
 
     async def _calibration_loop(self) -> None:
         while not self._stop.is_set():

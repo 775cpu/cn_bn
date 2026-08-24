@@ -17,7 +17,12 @@ def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> b
 async def run(args: argparse.Namespace) -> None:
     direct_ip = args.ip or args.rest_ip
     direct_ws_ip = args.ws_ip or args.ip
-    settings = Settings.from_python(args.config) if args.config and Path(args.config).exists() else Settings()
+    if args.config and Path(args.config).exists():
+        print(f"[配置] 读取 {Path(args.config).resolve()}", flush=True)
+        settings = Settings.from_python(args.config)
+    else:
+        print(f"[配置] 未找到 {args.config}，使用默认配置", flush=True)
+        settings = Settings()
     mode = args.network_mode or settings.network_mode
     rest_ips = (args.rest_ip or args.ip,) if args.rest_ip or args.ip else settings.rest_ips
     ws_ips = (args.ws_ip or args.ip,) if args.ws_ip or args.ip else settings.ws_ips
@@ -28,7 +33,11 @@ async def run(args: argparse.Namespace) -> None:
     tracker = BinanceTracker(settings)
     tracker.add_symbols(*settings.symbols)
     logging.getLogger("app").info("starting tracker symbols=%s", sorted(tracker.subscribed_symbols))
-    await tracker.start()
+    try:
+        await tracker.start()
+    except Exception as exc:
+        print(f"[启动失败] {type(exc).__name__}: {exc}", flush=True)
+        raise
     logging.getLogger("app").info("tracking symbols=%s", sorted(tracker.subscribed_symbols))
     try:
         await asyncio.Event().wait()

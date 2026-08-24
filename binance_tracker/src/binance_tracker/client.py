@@ -37,6 +37,7 @@ class BinanceClient:
         if not self.rest_ips and not self.ws_ips:
             return False
         assert self.session is not None
+        network_log.info("IP latency probe started rest=%d ws=%d timeout=%.1fs", len(self.rest_ips), len(self.ws_ips), self.ip_ping_timeout)
 
         async def probe(ip: str, host: str):
             started = time.perf_counter()
@@ -71,6 +72,7 @@ class BinanceClient:
         if ws_ip:
             self.ws_url, self.ws_headers = f"wss://{ws_ip}:9443/stream", {"Host": "stream.binance.com"}
         network_log.info("selected REST IP=%s latency=%s candidates=%s; WS IP=%s latency=%s candidates=%s", rest_ip, round(rest_latency * 1000, 1) if rest_latency else None, [(ip, round(latency * 1000, 1)) for ip, latency in rest_available], ws_ip, round(ws_latency * 1000, 1) if ws_latency else None, [(ip, round(latency * 1000, 1)) for ip, latency in ws_available])
+        network_log.info("IP latency probe completed REST=%s WS=%s", rest_ip or "domain", ws_ip or "domain")
         return rest_changed or ws_changed
 
     async def __aenter__(self):

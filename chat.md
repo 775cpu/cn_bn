@@ -96,3 +96,35 @@ DIRECT_WS_IP = None  这个有什么作用？
 - IP 直连默认关闭 TLS 证书校验。
 - 检查全部项目代码并清理不再需要的配置。
 - 说明或清理 `DIRECT_IP`、`DIRECT_WS_IP`；当前多 IP 配置应使用 `REST_IPS` 和 `WS_IPS`，单 IP 参数仅作为 CLI 临时覆盖。
+
+## 9. 最近几轮历史对话合并总结
+
+### 校准日志冲突
+
+- 用户提供了 Binance K 线校准日志，发现 `live` 与 `rest` 在成交量、成交笔数等字段上不一致，并要求分析为什么冲突。
+- 后续确认：本地 WebSocket 使用 `aggTrade` 事件计数，REST 的 `trades` 是逐笔成交数，统计口径不同，不能直接比较。
+- REST 是某一时刻的快照，WebSocket 持续接收成交；未闭合 K 线天然可能存在时序差异。
+- 用户继续关注已闭合 K 线出现的成交量和成交笔数差异，要求不要把正常差异误判为错误。
+
+### 配置与显示
+
+- 用户要求配置文件使用 Python 代码格式，不要 TOML 和 JSON。
+- 配置需要覆盖 symbol、网络、日志路径、日志滚动大小、IP 测速、校准间隔、Bollinger 参数和终端显示方式。
+- 默认原地刷新，不要每笔成交持续刷屏。
+- 行情显示只保留当前价格，以及价格突破 Bollinger 上轨或下轨的周期，并显示该周期的 Bollinger 详细数值。
+
+### 网络模式和启动脚本
+
+- 用户要求参考原有 `k.py`、`ws_agg.py` 的 IP 列表，支持多个 IP 并行测速并选择最低延迟地址。
+- 定时重测后，只有延迟改善达到足够阈值才中断当前连接并切换。
+- REST 和 WebSocket 使用不同的 IP 列表，分别配置 `REST_IPS` 和 `WS_IPS`。
+- 最终确认：`sh` 是 Binance 域名直连；`bat` 是读取 Python 配置中的 IP 并进行 IP 直连。
+- 域名模式默认开启 `VERIFY_SSL`，但允许配置关闭；IP 直连模式默认关闭证书校验。
+- Windows `start.bat` 使用 `%PY_PATH% -m binance_tracker.main %*`，并要求支持 `C:\QGB\miniforge3\python.exe`。
+
+### Windows 启动可见性
+
+- 用户反馈 Windows 10 运行 `start.bat` 时窗口没有任何提示，像程序卡住。
+- 要求启动阶段显示配置读取、网络模式、IP 测速、选中地址、每个 symbol 的校准开始与完成进度，以及启动失败原因。
+- 要求 `start.bat` 文件编码改为 GB18030。
+- 实际启动验证还应覆盖真实网络启动，而不应只运行单元测试、编译和 CLI 帮助。
