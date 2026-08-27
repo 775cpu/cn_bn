@@ -1,6 +1,8 @@
-import sys, io, urllib.parse, threading, traceback, struct, base64, hashlib, socket
+import sys, io, urllib.parse, threading, traceback, struct, base64, hashlib, socket, logging
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
+_stdout_lock = threading.Lock()
 
 def get_bmp_bytes(rgb=None, size=(16, 16)):
     if not rgb: rgb = (255, 0, 0)
@@ -224,17 +226,21 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             resp = ResponseWrapper()
             exec_globals['response'] = resp
             exec_globals['p'] = resp
-            old_stdout = sys.stdout
-            sys.stdout = io.StringIO()
             try:
-                exec(code, exec_globals,self.locals_dict)
-                output = sys.stdout.getvalue()
-                if 'r' in self.locals_dict:
+                with _stdout_lock:
+                    old_stdout = sys.stdout
+                    sys.stdout = io.StringIO()
+                    try:
+                        exec(code, exec_globals,self.locals_dict)
+                        output = sys.stdout.getvalue()
+                    finally:
+                        sys.stdout = old_stdout
+                if resp.data is not None:
+                    result_obj = resp.data
+                elif 'r' in self.locals_dict:
                     result_obj = self.locals_dict['r']
                 elif 'r' in exec_globals:
                     result_obj = exec_globals['r']
-                elif resp.data is not None:
-                    result_obj = resp.data
                 elif output:
                     result_obj = output
                 else:
@@ -245,10 +251,11 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                     self.send_header(k, v)
             except Exception as e:
                 result_str = traceback.format_exc()
+                logging.getLogger("error").exception(
+                    "RPC execution failed client=%s path=%s code=%s",
+                    self.client_address, self.path, code[:500],
+                )
                 self.send_response(500)
-            finally:
-                sys.stdout = old_stdout
-
             # 如果没有设置 Content-Type，则添加默认的
             if 'Content-Type' not in resp.headers:
                 self.send_header('Content-Type', 'text/plain; charset=utf-8')
@@ -258,11 +265,18 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                 body = resp.data
                 if isinstance(body, str):
                     body = body.encode('utf-8')
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    logging.getLogger("app").info("RPC client disconnected before response path=%s", self.path)
             else:
-                self.wfile.write(result_str.encode('utf-8'))
+                try:
+                    self.wfile.write(result_str.encode('utf-8'))
+                except (BrokenPipeError, ConnectionResetError):
+                    logging.getLogger("app").info("RPC client disconnected before response path=%s", self.path)
         except Exception as e:
-            self.send_error(500, str(e))
+            if not isinstance(e, (BrokenPipeError, ConnectionResetError)):
+                self.send_error(500, str(e))
 
 def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None, daemon=True,
                      favicon_rgb=None, favicon_size=16, websocket_handler=None,

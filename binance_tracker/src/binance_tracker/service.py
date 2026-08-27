@@ -121,7 +121,12 @@ class BinanceTracker:
         for connection in clients:
             state = getattr(connection, "chart_subscription", None)
             if state and state[0] == symbol:
-                self._chart_send(connection, self._chart_snapshot(symbol, state[1], 200))
+                bars = self.books[symbol].snapshot(state[1], 1)
+                if bars:
+                    self._chart_send(connection, {
+                        "type": "update", "symbol": symbol, "interval": state[1],
+                        "bar": bars[0], "server_time": int(time.time() * 1000),
+                    })
 
     async def start(self) -> None:
         if self._client is not None:

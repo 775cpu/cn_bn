@@ -50,3 +50,26 @@ def test_mismatch_does_not_rewind_active_bar():
     assert latest["open_time"] == 60_000
     assert latest["close"] == 100
     assert latest["volume"] == 1
+
+
+def test_mismatch_drops_stale_active_bar_when_rest_is_newer():
+    book = SymbolBook("BTCUSDT", ("1m",), boll_period=2)
+    book.update_trade(100, 1, 60_000)
+    rest = [
+        Kline(0, 90, 110, 80, 100, 20, 2000, 10, True),
+        Kline(120_000, 120, 125, 119, 123, 5, 615, 5, False),
+    ]
+
+    book.merge_mismatch("1m", rest)
+
+    bars = book.bars("1m")
+    assert [bar.open_time for bar in bars] == [0, 120_000]
+
+
+def test_replace_keeps_bars_strictly_ordered_and_unique():
+    book = SymbolBook("BTCUSDT", ("1m",), boll_period=2)
+    book.replace("1m", [Kline(60_000, 2, 2, 2, 2), Kline(0, 1, 1, 1, 1), Kline(60_000, 3, 3, 3, 3)])
+
+    bars = book.bars("1m")
+    assert [bar.open_time for bar in bars] == [0, 60_000]
+    assert bars[-1].close == 3

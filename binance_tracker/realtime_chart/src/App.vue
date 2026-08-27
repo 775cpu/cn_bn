@@ -11,7 +11,7 @@
     </header>
     <div class="status"><i :class="{ online: connected }"></i>{{ connected ? 'LIVE' : 'CONNECTING' }}</div>
     <div class="chart-wrap"><div ref="chart" class="chart"></div><div class="scale-controls"><button title="Auto: 让 K 线和指标尽量铺满屏幕" :class="{ active: autoScale }" @click="toggleAutoScale">A</button><button title="锁定价格尺度" :class="{ active: scaleLocked }" @click="toggleScaleLock">L</button></div></div>
-    <footer><span>实时行情</span><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span class="hint">WebSocket stream</span></footer>
+    <footer><span>实时行情</span><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint">WebSocket stream</span></footer>
   </main>
 </template>
 
@@ -24,7 +24,7 @@ export default {
     return {
       chart: null, socket: null, reconnectTimer: null, connected: false,
       symbol: window.__INITIAL_SYMBOL__ || 'BTCUSDT', interval: window.__INITIAL_INTERVAL__ || '1m', bars: [],
-      autoScale: true, scaleLocked: false, pricePrecision: 8,
+      autoScale: true, scaleLocked: false, pricePrecision: 8, latency: '--', serverTime: '--', pendingHistory: null, historyRetryTimer: null, historyRetryCount: 0, requestedHistory: new Set(), historyExhausted: false, chartGeneration: 0,
       symbols: window.__SYMBOLS__ || ['BTCUSDT'],
       intervals: window.__INTERVALS__ || ['1m'],
     };
@@ -33,7 +33,7 @@ export default {
     barCount() { return this.bars.length; },
     lastBar() { return this.bars[this.bars.length - 1] || {}; },
     lastPrice() { return this.lastBar.close == null ? '--' : Number(this.lastBar.close).toLocaleString(undefined, { maximumFractionDigits: 8 }); },
-    lastTime() { return this.lastBar.timestamp ? new Date(this.lastBar.timestamp).toLocaleString() : '--'; },
+    lastTime() { return this.lastBar.timestamp ? this.formatTime(this.lastBar.timestamp) : '--'; },
     changeText() {
       if (!this.lastBar.open) return '--';
       const value = (this.lastBar.close - this.lastBar.open) / this.lastBar.open * 100;
@@ -44,16 +44,116 @@ export default {
   mounted() {
     this.log('mounted', { symbol: this.symbol, interval: this.interval, url: location.href });
     this.chart = init(this.$refs.chart);
+    this.chart.setTimezone('Asia/Shanghai');
     this.chart.setStyles({ grid: { horizontal: { color: '#263238' }, vertical: { color: '#263238' } }, candle: { type: 'candle_solid', bar: { upColor: '#35c99a', downColor: '#ef6b73', noChangeColor: '#9aa6ab' } } });
     this.chart.createIndicator({ name: 'BOLL', calcParams: [21, 3] }, false, { id: 'candle_pane' });
     this.chart.createIndicator('VOL');
+    this.chart.setLoadDataCallback(({ type, data, callback }) => {
+      if (type !== 'forward') {
+        callback([], false);
+        return;
+      }
+      const endTime = data?.timestamp ?? this.chart.getDataList()[0]?.timestamp;
+      if (!Number.isFinite(endTime) || this.historyExhausted) {
+        callback([], false);
+        return;
+      }
+      this.requestHistory(endTime, callback);
+    });
     this.updateAxisMode();
     this.connect();
   },
-  beforeUnmount() { clearTimeout(this.reconnectTimer); this.socket?.close(); dispose(this.$refs.chart); },
+  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
   methods: {
-    log(event, details) { console.info(`[realtime-chart] ${event}`, details || ''); },
+    log(event, details) {
+      if (event === 'history-rpc-error' || event === 'history-rejected-gap' || event === 'ws-error' || event === 'server-error') {
+        console.error(`[realtime-chart] ${event}`, details || '');
+      }
+    },
+    formatTime(timestamp) {
+      return new Intl.DateTimeFormat('zh-CN', {
+        timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+      }).format(new Date(timestamp));
+    },
+    normalizeBars(bars) {
+      return Array.from(new Map(bars.map((bar) => [bar.timestamp, bar])).values()).sort((a, b) => a.timestamp - b.timestamp);
+    },
+    intervalStep() {
+      return this.interval === '1M' ? 0 : ({ '1s': 1000, '1m': 60000, '3m': 180000, '5m': 300000, '15m': 900000, '30m': 1800000, '1h': 3600000, '2h': 7200000, '4h': 14400000, '6h': 21600000, '8h': 28800000, '12h': 43200000, '1d': 86400000, '3d': 259200000, '1w': 604800000 }[this.interval] || 0);
+    },
     toChartBar(bar) { return { timestamp: bar.open_time, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume }; },
+    requestHistory(endTime, callback, auto = false) {
+      const requestKey = `${this.symbol}:${this.interval}:${endTime}`;
+      if (this.pendingHistory || this.requestedHistory.has(requestKey)) {
+        this.log('history-skip-duplicate', { requestKey });
+        callback([], false);
+        return;
+      }
+      this.pendingHistory = { requestKey, callback, generation: this.chartGeneration };
+      this.requestedHistory.add(requestKey);
+      const expression = `chart_history(p,symbol='${this.symbol}',interval='${this.interval}',end_time=${endTime},limit=100)`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('history-rpc-request', { url, auto });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        if (!this.pendingHistory || this.pendingHistory.generation !== this.chartGeneration) return;
+        const step = this.intervalStep();
+        const existing = new Set(this.chart.getDataList().map((bar) => bar.timestamp));
+        const history = data.bars.map((bar) => this.toChartBar(bar)).filter((bar) => Number.isFinite(bar.timestamp) && bar.timestamp < endTime && !existing.has(bar.timestamp) && (!step || bar.timestamp % step === 0)).sort((a, b) => a.timestamp - b.timestamp);
+        const historyEnd = history[history.length - 1]?.timestamp;
+        const contiguous = !step || (historyEnd === endTime - step && history.every((bar, index) => index === 0 || bar.timestamp - history[index - 1].timestamp === step));
+        if (history.length && !contiguous) {
+          this.log('history-rejected-gap', { endTime, historyEnd, step, bars: history.length });
+          this.pendingHistory = null;
+          callback([], false);
+          return;
+        }
+        const more = history.length === 100 && (!step || history[0].timestamp <= endTime - step);
+        const pendingCallback = this.pendingHistory.callback;
+        this.pendingHistory = null;
+        this.historyRetryCount = 0;
+        const merged = new Map(history.concat(this.bars).map((bar) => [bar.timestamp, bar]));
+        this.bars = Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        pendingCallback(history, more);
+        if (!more) this.historyExhausted = true;
+        this.log('history-applied', { bars: history.length, more, oldest: history[0]?.timestamp });
+      }).catch((error) => {
+        console.error('[realtime-chart] history-rpc-error', error);
+        if (this.pendingHistory?.generation === this.chartGeneration) {
+          const pendingCallback = this.pendingHistory.callback;
+          this.pendingHistory = null;
+          pendingCallback([], true);
+          if (this.historyRetryCount < 3) {
+            this.historyRetryCount += 1;
+            clearTimeout(this.historyRetryTimer);
+            this.historyRetryTimer = setTimeout(() => {
+              this.historyRetryTimer = null;
+              const firstBar = this.chart.getDataList()[0];
+              const visible = this.chart.getVisibleRange();
+              if (visible?.from === 0 && firstBar) this.requestHistory(firstBar.timestamp, pendingCallback);
+            }, 1500);
+          }
+        }
+      });
+    },
+    autoLoadHistory() {
+      if (this.pendingHistory || this.historyExhausted) return;
+      const visible = this.chart.getVisibleRange();
+      if (visible && visible.from > 0) {
+        this.log('history-auto-stop', { reason: 'viewport-filled', visible });
+        return;
+      }
+      const firstBar = this.chart.getDataList()[0];
+      if (firstBar) {
+        const endTime = firstBar.timestamp;
+        this.requestHistory(endTime, (bars, more) => {
+          this.chart.applyMoreData(bars, more, () => {
+            if (more) this.autoLoadHistory();
+          });
+        }, true);
+      }
+    },
     subscribe() {
       const url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}')`;
       history.replaceState({ symbol: this.symbol, interval: this.interval }, '', url);
@@ -78,21 +178,55 @@ export default {
       const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const query = new URLSearchParams({ symbol: this.symbol, interval: this.interval });
       this.log('ws-connect', { url: `${scheme}//${location.host}/chart-ws?${query}` });
-      this.socket = new WebSocket(`${scheme}//${location.host}/chart-ws?${query}`);
-      this.socket.onopen = () => { this.connected = true; this.log('ws-open'); this.subscribe(); };
-      this.socket.onclose = (event) => { this.connected = false; this.log('ws-close', event); this.reconnectTimer = setTimeout(() => this.connect(), 1000); };
-      this.socket.onerror = (event) => { this.connected = false; console.error('[realtime-chart] ws-error', event); };
-      this.socket.onmessage = (event) => {
+      const socket = new WebSocket(`${scheme}//${location.host}/chart-ws?${query}`);
+      this.socket = socket;
+      socket.onopen = () => { if (socket !== this.socket) return; this.connected = true; this.log('ws-open'); };
+      socket.onclose = (event) => { if (socket !== this.socket) return; this.connected = false; this.log('ws-close', event); this.reconnectTimer = setTimeout(() => this.connect(), 1000); };
+      socket.onerror = (event) => { if (socket !== this.socket) return; this.connected = false; console.error('[realtime-chart] ws-error', event); };
+      socket.onmessage = (event) => {
+        if (socket !== this.socket) return;
         const message = JSON.parse(event.data);
         this.log('ws-message', { type: message.type, symbol: message.symbol, interval: message.interval, bars: message.bars?.length });
         if (message.type === 'snapshot') {
           this.symbol = message.symbol; this.interval = message.interval;
           this.pricePrecision = Number.isInteger(message.price_precision) ? message.price_precision : 8;
-          this.bars = message.bars.map((bar) => this.toChartBar(bar));
+          this.serverTime = this.formatTime(message.server_time);
+          this.bars = this.normalizeBars(message.bars.map((bar) => this.toChartBar(bar)));
+          this.chartGeneration += 1;
+          this.pendingHistory = null;
+          this.requestedHistory = new Set();
+          this.historyExhausted = false;
           this.chart.applyNewData(this.bars);
           this.updateAxisMode();
+        } else if (message.type === 'update') {
+          const bar = this.toChartBar(message.bar);
+          const index = this.bars.findIndex((item) => item.timestamp === bar.timestamp);
+          if (index >= 0) {
+            this.bars.splice(index, 1, bar);
+            this.chart.updateData(bar);
+          } else if (!this.bars.length || bar.timestamp > this.bars[this.bars.length - 1].timestamp) {
+            this.bars.push(bar);
+            this.chart.updateData(bar);
+          } else {
+            this.bars = this.normalizeBars(this.bars.concat(bar));
+            this.chart.applyNewData(this.bars);
+          }
+          this.serverTime = this.formatTime(message.server_time);
+          this.log('realtime-update', { timestamp: bar.timestamp });
+        } else if (message.type === 'pong') {
+          this.latency = `${Math.max(0, performance.now() - message.sent_at).toFixed(0)} ms`;
+          this.serverTime = this.formatTime(message.server_time);
+          this.log('ws-pong', { latency: this.latency });
+        } else if (message.type === 'error') {
+          console.error('[realtime-chart] server-error', message.message);
         }
       };
+      clearInterval(this.pingTimer);
+      this.pingTimer = setInterval(() => {
+        if (this.socket?.readyState === WebSocket.OPEN) {
+          this.socket.send(JSON.stringify({ type: 'ping', sent_at: performance.now() }));
+        }
+      }, 1000);
     },
     toggleFullscreen() { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); },
   },

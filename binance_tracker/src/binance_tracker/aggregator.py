@@ -74,8 +74,9 @@ class SymbolBook:
             self._update_latest_boll(interval)
 
     def replace(self, interval: str, klines: list[Kline]) -> None:
+        ordered = {bar.open_time: bar for bar in klines}
         self._bars[interval].clear()
-        self._bars[interval].extend(klines)
+        self._bars[interval].extend(sorted(ordered.values(), key=lambda bar: bar.open_time))
         closes: list[float] = []
         for bar in self._bars[interval]:
             closes.append(bar.close)
@@ -85,10 +86,9 @@ class SymbolBook:
         """Replace closed history while retaining the locally newer active bar."""
         current = self._bars[interval][-1] if self._bars[interval] else None
         active = current if current and not current.closed else None
-        if active and klines and klines[-1].open_time == active.open_time and not klines[-1].closed:
-            klines = klines[:-1]
         merged = list(klines)
-        if active:
+        if active and (not klines or active.open_time >= klines[-1].open_time):
+            merged = [bar for bar in merged if bar.open_time != active.open_time]
             merged.append(active)
         self.replace(interval, merged)
 

@@ -20,6 +20,48 @@ def chart_page(response, symbol=None, interval=None):
     response.set_header("Content-Type", "text/html; charset=utf-8")
     response.set_data(page)
 
+def chart_history(response, symbol, interval, end_time, limit=100):
+    """Return older bars through the existing RPC HTTP endpoint."""
+    symbol = str(symbol).upper()
+    interval = str(interval)
+    try:
+        end_time = int(end_time)
+        limit = min(max(int(limit), 1), 1000)
+    except (TypeError, ValueError, OverflowError):
+        logging.getLogger("error").warning(
+            "invalid chart history arguments symbol=%r interval=%r end_time=%r limit=%r",
+            symbol, interval, end_time, limit,
+        )
+        response.set_status(400)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "end_time 和 limit 必须是整数"}, ensure_ascii=False))
+        return
+    if symbol not in tracker.books or interval not in tracker.settings.intervals:
+        response.set_status(400)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "无效的 symbol 或周期"}, ensure_ascii=False))
+        return
+    if not tracker._loop or not tracker._client:
+        response.set_status(503)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "行情服务尚未准备完成"}, ensure_ascii=False))
+        return
+    future = asyncio.run_coroutine_threadsafe(
+        tracker._client.klines(symbol, interval, limit, end_time=end_time - 1),
+        tracker._loop,
+    )
+    try:
+        bars = [bar.as_dict() for bar in future.result(timeout=20)]
+    except Exception:
+        logging.getLogger("error").exception(
+            "chart history RPC failed symbol=%s interval=%s end_time=%d limit=%d",
+            symbol, interval, end_time, limit,
+        )
+        response.set_status(502)
+        bars = []
+    response.set_header("Content-Type", "application/json; charset=utf-8")
+    response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
+
 def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> bool:
     if insecure:
         return False
