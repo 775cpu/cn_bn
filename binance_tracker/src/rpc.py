@@ -1,4 +1,4 @@
-import sys, io, urllib.parse, threading, traceback, struct
+import sys, io, urllib.parse, threading, traceback, struct, base64, hashlib, socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -37,14 +37,109 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
+class WebSocket:
+    """Small text WebSocket connection used by the RPC server."""
+    def __init__(self, handler):
+        self.handler = handler
+        self.socket = handler.connection
+        self.send_lock = threading.Lock()
+        self.closed = False
+
+    def send(self, message):
+        if isinstance(message, str):
+            message = message.encode('utf-8')
+        if len(message) >= 126:
+            if len(message) < 65536:
+                header = struct.pack('!BBH', 0x81, 126, len(message))
+            else:
+                header = struct.pack('!BBQ', 0x81, 127, len(message))
+        else:
+            header = bytes((0x81, len(message)))
+        with self.send_lock:
+            self.socket.sendall(header + message)
+
+    def receive(self):
+        """Return the next text message, or None when the peer disconnects."""
+        fragments = []
+        while True:
+            header = self._read_exact(2)
+            if not header:
+                return None
+            first, second = header
+            final = bool(first & 0x80)
+            opcode = first & 0x0f
+            masked = bool(second & 0x80)
+            length = second & 0x7f
+            if length == 126:
+                length = struct.unpack('!H', self._read_exact(2))[0]
+            elif length == 127:
+                length = struct.unpack('!Q', self._read_exact(8))[0]
+            mask = self._read_exact(4) if masked else b''
+            payload = bytearray(self._read_exact(length))
+            if masked:
+                for index in range(length):
+                    payload[index] ^= mask[index % 4]
+            if opcode == 0x8:
+                self.close()
+                return None
+            if opcode == 0x9:
+                self._send_control(0xA, payload)
+                continue
+            if opcode in (0x1, 0x0):
+                fragments.append(bytes(payload))
+                if final:
+                    return b''.join(fragments).decode('utf-8')
+                continue
+            if opcode == 0xA:
+                continue
+            raise ValueError(f'unsupported WebSocket opcode: {opcode}')
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            try:
+                with self.send_lock:
+                    self.socket.sendall(b'\x88\x00')
+            except OSError:
+                pass
+
+    def _send_control(self, opcode, payload=b''):
+        with self.send_lock:
+            self.socket.sendall(bytes((0x80 | opcode, len(payload))) + payload)
+
+    def _read_exact(self, size):
+        data = b''
+        while len(data) < size:
+            chunk = self.socket.recv(size - len(data))
+            if not chunk:
+                return b''
+            data += chunk
+        return data
+
 class RPCRequestHandler(BaseHTTPRequestHandler):
     key = ''
     globals_dict = None
     locals_dict={}
     favicon_bytes = None
+    websocket_handler = None
+    websocket_handlers = {}
+    websocket_path = '/ws'
+    redirect_root = None
     def log_message(self, format, *args):
         print(f"[RPC] {self.address_string()} - {format % args}")
     def do_GET(self):
+        websocket_path = self.path.split('?', 1)[0]
+        websocket_handler = self.websocket_handlers.get(websocket_path, self.websocket_handler)
+        if (websocket_handler and (websocket_path == self.websocket_path or websocket_path in self.websocket_handlers)
+            and self.headers.get('Upgrade', '').lower() == 'websocket'):
+            self.handle_websocket(websocket_handler)
+            return
+        if self.path == '/' and self.redirect_root:
+            self.send_response(302)
+            self.send_header('Location', self.redirect_root)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
         if self.path == '/favicon.ico' and self.favicon_bytes:
             self.send_response(200)
             self.send_header('Content-Type', 'image/x-icon')
@@ -54,6 +149,38 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(self.favicon_bytes)
             return
         self.handle_rpc()
+
+    def handle_websocket(self, websocket_handler):
+        # 【关键修复】：强制修改服务器响应版本，满足 iOS Safari 的严格标准
+        self.protocol_version = 'HTTP/1.1' 
+        
+        key = self.headers.get('Sec-WebSocket-Key')
+        if not key or self.headers.get('Sec-WebSocket-Version') != '13':
+            self.send_error(400, 'WebSocket version 13 and key are required')
+            return
+            
+        # 生成 accept key
+        accept = base64.b64encode(hashlib.sha1(
+            (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode('ascii')
+        ).digest()).decode('ascii')
+        
+        # 因为上面改了版本号，这里发出去的就会是 HTTP/1.1 101 Switching Protocols
+        self.send_response(101, 'Switching Protocols')
+        self.send_header('Upgrade', 'websocket')
+        self.send_header('Connection', 'Upgrade')
+        self.send_header('Sec-WebSocket-Accept', accept)
+        self.end_headers()
+        # ... 后续进入 WebSocket 的收发循环
+        
+        websocket = WebSocket(self)
+        try:
+            websocket_handler(websocket, self)
+        except (ConnectionError, BrokenPipeError, socket.error):
+            pass
+        except Exception:
+            traceback.print_exc()
+        finally:
+            websocket.close()
     def do_POST(self):
         self.handle_rpc()
     def handle_rpc(self):
@@ -102,12 +229,12 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             try:
                 exec(code, exec_globals,self.locals_dict)
                 output = sys.stdout.getvalue()
-                if 'r' in self.locals_dict:
+                if resp.data is not None:
+                    result_obj = resp.data
+                elif 'r' in self.locals_dict:
                     result_obj = self.locals_dict['r']
                 elif 'r' in exec_globals:
                     result_obj = exec_globals['r']
-                elif resp.data is not None:
-                    result_obj = resp.data
                 elif output:
                     result_obj = output
                 else:
@@ -137,11 +264,17 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, str(e))
 
-def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None,locals=None, daemon=True, favicon_rgb=None, favicon_size=16):
+def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None, daemon=True,
+                     favicon_rgb=None, favicon_size=16, websocket_handler=None,
+                     websocket_path='/ws', redirect_root=None, websocket_handlers=None):
     if not key:key = ''
     RPCRequestHandler.key = key
     RPCRequestHandler.globals_dict = globals if globals else {}
     RPCRequestHandler.locals_dict = locals if locals is not None else {}
+    RPCRequestHandler.websocket_handler = websocket_handler
+    RPCRequestHandler.websocket_path = websocket_path
+    RPCRequestHandler.websocket_handlers = websocket_handlers or {}
+    RPCRequestHandler.redirect_root = redirect_root
     if favicon_rgb is None:
         favicon_rgb = (port // 100, port % 100, 0)
     RPCRequestHandler.favicon_bytes = get_bmp_bytes(rgb=favicon_rgb, size=favicon_size)

@@ -307,6 +307,30 @@ def get_futures_kline(symbol,interval='1M',start=0,end=None,limit=1000,convert_f
 	return j
 get_kline_futures=get_futures_kline	
 
+def get_symbol_price_precision(symbols=None, base_url='https://api.binance.com'):
+	"""Query spot PRICE_FILTER tick sizes and return symbol -> decimal places."""
+	import json
+	import urllib.parse
+	import urllib.request
+	if isinstance(symbols, str):
+		symbols = [symbols]
+	params = {'symbols': json.dumps([str(symbol).upper() for symbol in symbols])} if symbols else {}
+	url = base_url.rstrip('/') + '/api/v3/exchangeInfo'
+	if params:
+		url += '?' + urllib.parse.urlencode(params)
+	with urllib.request.urlopen(url) as response:
+		payload = json.load(response)
+	result = {}
+	for item in payload.get('symbols', []):
+		for rule in item.get('filters', []):
+			if rule.get('filterType') == 'PRICE_FILTER':
+				tick_size = rule['tickSize'].rstrip('0')
+				result[item['symbol']] = max(0, len(tick_size.split('.')[1]) if '.' in tick_size else 0)
+				break
+	return result
+
+get_price_precision = get_symbol_price_precision
+
 def get_kline_without_pandas(symbol,interval='1d',start=0,end=None,limit=1000,convert_func=Decimal,
 convert_OpenTime=False,convert_CloseTime=False,proxies=None,**ka):
 	if not convert_func:convert_func=lambda a:a

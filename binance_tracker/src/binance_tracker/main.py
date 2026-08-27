@@ -1,11 +1,51 @@
 import argparse
 import asyncio
 import logging
+import json
 from dataclasses import replace
 from pathlib import Path
 from .config import Settings
 from .logging_setup import setup_logging
 from .service import BinanceTracker
+
+def chart_page(response, symbol=None, interval=None):
+    symbol = str(symbol or next(iter(tracker.subscribed_symbols), "BTCUSDT")).upper()
+    interval = str(interval or tracker.settings.intervals[0])
+    if symbol not in tracker.books:
+        symbol = next(iter(tracker.subscribed_symbols), "BTCUSDT")
+    if interval not in tracker.settings.intervals:
+        interval = tracker.settings.intervals[0]
+    page = (Path(__file__).resolve().parents[2] / "realtime_chart" / "dist" / "index.html").read_text(encoding="utf-8")
+    page = page.replace("</head>", f"<script>window.__SYMBOLS__={json.dumps(sorted(tracker.subscribed_symbols))};window.__INTERVALS__={json.dumps(list(tracker.settings.intervals))};window.__INITIAL_SYMBOL__={json.dumps(symbol)};window.__INITIAL_INTERVAL__={json.dumps(interval)};</script></head>")
+    response.set_header("Content-Type", "text/html; charset=utf-8")
+    response.set_data(page)
+
+def chart_history(response, symbol, interval, end_time, limit=100):
+    """Return older bars through the existing RPC HTTP endpoint."""
+    symbol = str(symbol).upper()
+    interval = str(interval)
+    if symbol not in tracker.books or interval not in tracker.settings.intervals:
+        response.set_status(400)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "无效的 symbol 或周期"}, ensure_ascii=False))
+        return
+    if not tracker._loop or not tracker._client:
+        response.set_status(503)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "行情服务尚未准备完成"}, ensure_ascii=False))
+        return
+    future = asyncio.run_coroutine_threadsafe(
+        tracker._client.klines(symbol, interval, min(max(int(limit), 1), 1000), end_time=int(end_time) - 1),
+        tracker._loop,
+    )
+    try:
+        bars = [bar.as_dict() for bar in future.result(timeout=20)]
+    except Exception as exc:
+        logging.getLogger("app").exception("chart history RPC failed symbol=%s interval=%s", symbol, interval)
+        response.set_status(502)
+        bars = []
+    response.set_header("Content-Type", "application/json; charset=utf-8")
+    response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
 
 def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> bool:
     if insecure:
@@ -33,11 +73,12 @@ async def run(args: argparse.Namespace) -> None:
         rest_ips, ws_ips = (), ()
     settings = replace(settings, symbols=tuple(args.symbols or settings.symbols), network_mode=mode, direct_ip=direct_ip, direct_ws_ip=direct_ws_ip, rest_ips=rest_ips, ws_ips=ws_ips, verify_ssl=resolve_verify_ssl(mode, settings.verify_ssl, args.insecure))
     setup_logging(settings.log_dir, settings.log_max_bytes, settings.log_backup_count)
+    global tracker
     tracker = BinanceTracker(settings)
     tracker.add_symbols(*settings.symbols)
     logging.getLogger("app").info("starting tracker symbols=%s", sorted(tracker.subscribed_symbols))
     
-    rpc_server,rpc_thread=__import__('rpc').start_rpc_server(port=1188,key='',globals=globals(), locals=locals())
+    rpc_server,rpc_thread=__import__('rpc').start_rpc_server(port=1188, key='', globals=globals(), locals=locals(), redirect_root='/chart_page(p)', websocket_handlers={'/chart-ws': tracker.chart_websocket})
     
     try:
         await tracker.start()

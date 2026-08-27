@@ -1,4 +1,6 @@
 import asyncio
+import json
+from urllib.parse import parse_qs, urlsplit
 import logging
 import math
 import time
@@ -25,6 +27,9 @@ class BinanceTracker:
         self._client: BinanceClient | None = None
         self._symbols_lock = threading.RLock()
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._chart_clients: set = set()
+        self._chart_clients_lock = threading.RLock()
+        self._price_precisions: dict[str, int] = {}
         self.display = display or TerminalDisplay(self.settings.display_mode, self.settings.display_only_breakouts, self.settings.display_price_decimals, self.settings.display_boll_decimals, self.settings.display_refresh_seconds)
 
     @property
@@ -61,6 +66,68 @@ class BinanceTracker:
             raise KeyError(interval)
         return self.books[symbol].snapshot(interval, count)
 
+    def _chart_send(self, connection, message: dict) -> None:
+        try:
+            connection.send(json.dumps(message, ensure_ascii=False))
+        except (ConnectionError, OSError):
+            with self._chart_clients_lock:
+                self._chart_clients.discard(connection)
+
+    def _chart_snapshot(self, symbol: str, interval: str, count: int = 200) -> dict:
+        return {"type": "snapshot", "symbol": symbol, "interval": interval,
+                "bars": self.get_snapshot(symbol, interval, count),
+                "price_precision": self._price_precisions.get(symbol, self.settings.display_price_decimals),
+                "server_time": int(time.time() * 1000)}
+
+    def chart_websocket(self, connection, request) -> None:
+        symbol = next(iter(self.subscribed_symbols), "")
+        interval = self.settings.intervals[0]
+        query = parse_qs(urlsplit(request.path).query)
+        symbol = query.get("symbol", [symbol])[0].upper()
+        interval = query.get("interval", [interval])[0]
+        if symbol not in self.books:
+            symbol = next(iter(self.subscribed_symbols), "")
+        if interval not in self.settings.intervals:
+            interval = self.settings.intervals[0]
+        connection.chart_subscription = (symbol, interval)
+        with self._chart_clients_lock:
+            self._chart_clients.add(connection)
+        try:
+            self._chart_send(connection, self._chart_snapshot(symbol, interval))
+            while True:
+                raw = connection.receive()
+                if raw is None:
+                    break
+                message = json.loads(raw)
+                if message.get("type") == "subscribe":
+                    symbol = str(message.get("symbol", symbol)).upper()
+                    interval = str(message.get("interval", interval))
+                    if symbol not in self.books or interval not in self.settings.intervals:
+                        self._chart_send(connection, {"type": "error", "message": "无效的 symbol 或周期"})
+                        continue
+                    connection.chart_subscription = (symbol, interval)
+                    self._chart_send(connection, self._chart_snapshot(symbol, interval))
+                elif message.get("type") == "ping":
+                    self._chart_send(connection, {"type": "pong", "sent_at": message.get("sent_at"), "server_time": int(time.time() * 1000)})
+        except (ConnectionError, OSError, ValueError):
+            pass
+        finally:
+            with self._chart_clients_lock:
+                self._chart_clients.discard(connection)
+
+    def _notify_chart(self, symbol: str) -> None:
+        with self._chart_clients_lock:
+            clients = tuple(self._chart_clients)
+        for connection in clients:
+            state = getattr(connection, "chart_subscription", None)
+            if state and state[0] == symbol:
+                bars = self.books[symbol].snapshot(state[1], 1)
+                if bars:
+                    self._chart_send(connection, {
+                        "type": "update", "symbol": symbol, "interval": state[1],
+                        "bar": bars[0], "server_time": int(time.time() * 1000),
+                    })
+
     async def start(self) -> None:
         if self._client is not None:
             return
@@ -68,6 +135,7 @@ class BinanceTracker:
         self._loop = asyncio.get_running_loop()
         try:
             await self._client.__aenter__()
+            await self._load_price_precisions()
             self._stop.clear()
             print(f"[启动] symbols={','.join(sorted(self._symbols))}", flush=True)
             print(f"[启动] network_mode={self.settings.network_mode} ssl_verify={self.settings.verify_ssl}", flush=True)
@@ -85,6 +153,26 @@ class BinanceTracker:
             await self._client.__aexit__(None, None, None)
             self._client = None
             raise
+
+    async def _load_price_precisions(self) -> None:
+        """Load symbol-specific display precision once; chart updates remain WS-only."""
+        assert self._client is not None and self._client.session is not None
+        params = {"symbols": json.dumps(sorted(self.subscribed_symbols), separators=(",", ":"))}
+        try:
+            async with self._client.session.get(
+                f"{self._client.rest_url}/api/v3/exchangeInfo",
+                params=params, headers=self._client.rest_headers,
+                ssl=False if self._client.rest_headers else self.settings.verify_ssl,
+            ) as response:
+                response.raise_for_status()
+                payload = await response.json()
+            for item in payload.get("symbols", []):
+                rule = next((rule for rule in item.get("filters", []) if rule.get("filterType") == "PRICE_FILTER"), None)
+                if rule:
+                    tick_size = rule["tickSize"].rstrip("0")
+                    self._price_precisions[item["symbol"]] = len(tick_size.split(".", 1)[1]) if "." in tick_size else 0
+        except Exception:
+            app_log.exception("failed to load symbol price precisions; using defaults")
 
     async def stop(self) -> None:
         self._stop.set()
@@ -186,6 +274,7 @@ class BinanceTracker:
                         if symbol in self.books:
                             price = float(payload["p"])
                             self.books[symbol].update_trade(price, float(payload["q"]), int(payload["T"]), price * float(payload["q"]))
+                            self._notify_chart(symbol)
                             self.display.update(symbol, price, self.books[symbol], self.settings.intervals)
                     elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         raise ConnectionError(f"WebSocket closed: {message.type}")
