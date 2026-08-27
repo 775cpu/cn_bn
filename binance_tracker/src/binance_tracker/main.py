@@ -20,33 +20,6 @@ def chart_page(response, symbol=None, interval=None):
     response.set_header("Content-Type", "text/html; charset=utf-8")
     response.set_data(page)
 
-def chart_history(response, symbol, interval, end_time, limit=100):
-    """Return older bars through the existing RPC HTTP endpoint."""
-    symbol = str(symbol).upper()
-    interval = str(interval)
-    if symbol not in tracker.books or interval not in tracker.settings.intervals:
-        response.set_status(400)
-        response.set_header("Content-Type", "application/json; charset=utf-8")
-        response.set_data(json.dumps({"error": "无效的 symbol 或周期"}, ensure_ascii=False))
-        return
-    if not tracker._loop or not tracker._client:
-        response.set_status(503)
-        response.set_header("Content-Type", "application/json; charset=utf-8")
-        response.set_data(json.dumps({"error": "行情服务尚未准备完成"}, ensure_ascii=False))
-        return
-    future = asyncio.run_coroutine_threadsafe(
-        tracker._client.klines(symbol, interval, min(max(int(limit), 1), 1000), end_time=int(end_time) - 1),
-        tracker._loop,
-    )
-    try:
-        bars = [bar.as_dict() for bar in future.result(timeout=20)]
-    except Exception as exc:
-        logging.getLogger("app").exception("chart history RPC failed symbol=%s interval=%s", symbol, interval)
-        response.set_status(502)
-        bars = []
-    response.set_header("Content-Type", "application/json; charset=utf-8")
-    response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
-
 def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> bool:
     if insecure:
         return False

@@ -229,12 +229,12 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             try:
                 exec(code, exec_globals,self.locals_dict)
                 output = sys.stdout.getvalue()
-                if resp.data is not None:
-                    result_obj = resp.data
-                elif 'r' in self.locals_dict:
+                if 'r' in self.locals_dict:
                     result_obj = self.locals_dict['r']
                 elif 'r' in exec_globals:
                     result_obj = exec_globals['r']
+                elif resp.data is not None:
+                    result_obj = resp.data
                 elif output:
                     result_obj = output
                 else:

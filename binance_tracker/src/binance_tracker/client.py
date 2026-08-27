@@ -103,14 +103,10 @@ class BinanceClient:
         if self.session:
             await self.session.close()
 
-    async def klines(self, symbol: str, interval: str, limit: int, start_time: int | None = None, end_time: int | None = None) -> list[Kline]:
+    async def klines(self, symbol: str, interval: str, limit: int) -> list[Kline]:
         assert self.session is not None
         url = f"{self.rest_url}/api/v3/klines"
         params = {"symbol": symbol, "interval": interval, "limit": limit}
-        if start_time is not None:
-            params["startTime"] = start_time
-        if end_time is not None:
-            params["endTime"] = end_time
         for attempt in range(3):
             try:
                 async with self.session.get(url, params=params, proxy=self.http_proxy, headers=self.rest_headers if self.rest_url.startswith("https://") else None, ssl=self.verify_ssl) as response:
