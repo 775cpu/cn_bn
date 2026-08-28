@@ -26,6 +26,9 @@ if ! python -c "import aiohttp" &>/dev/null; then
 /workspaces/cn_bn/binance_tracker/src/qgb/tests/tantivy_test.py \
 /workspaces/cn_bn/binance_tracker/src/qgb/tests/whoosh_test.py
 
+    # 忽略 qgb 子模块的所有文件，避免被 git 追踪
+    git config submodule.binance_tracker/src/qgb.ignore all
+
 else
     echo "依赖已满足，跳过安装"
 fi

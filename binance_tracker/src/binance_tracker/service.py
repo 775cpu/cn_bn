@@ -135,7 +135,6 @@ class BinanceTracker:
         self._loop = asyncio.get_running_loop()
         try:
             await self._client.__aenter__()
-            await self._load_price_precisions()
             self._stop.clear()
             print(f"[启动] symbols={','.join(sorted(self._symbols))}", flush=True)
             print(f"[启动] network_mode={self.settings.network_mode} ssl_verify={self.settings.verify_ssl}", flush=True)
@@ -145,6 +144,7 @@ class BinanceTracker:
                 print(f"[网络] 当前 REST={self._client.current_rest_ip or 'domain'} WS={self._client.current_ws_ip or 'domain'}", flush=True)
             else:
                 print("[网络] 使用域名直连", flush=True)
+            await self._load_price_precisions()
             self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop()), asyncio.create_task(self._ip_selection_loop())]
             await asyncio.gather(*(self._check_mismatch_symbol(symbol) for symbol in tuple(self._symbols)))
             self._tasks.append(asyncio.create_task(self._mismatch_loop()))
@@ -154,25 +154,38 @@ class BinanceTracker:
             self._client = None
             raise
 
-    async def _load_price_precisions(self) -> None:
-        """Load symbol-specific display precision once; chart updates remain WS-only."""
+    async def _load_price_precisions(self, retries: int = 3) -> bool:
+        """Load symbol-specific display precision; return whether any value was loaded."""
         assert self._client is not None and self._client.session is not None
         params = {"symbols": json.dumps(sorted(self.subscribed_symbols), separators=(",", ":"))}
-        try:
-            async with self._client.session.get(
-                f"{self._client.rest_url}/api/v3/exchangeInfo",
-                params=params, headers=self._client.rest_headers,
-                ssl=False if self._client.rest_headers else self.settings.verify_ssl,
-            ) as response:
-                response.raise_for_status()
-                payload = await response.json()
-            for item in payload.get("symbols", []):
-                rule = next((rule for rule in item.get("filters", []) if rule.get("filterType") == "PRICE_FILTER"), None)
-                if rule:
-                    tick_size = rule["tickSize"].rstrip("0")
-                    self._price_precisions[item["symbol"]] = len(tick_size.split(".", 1)[1]) if "." in tick_size else 0
-        except Exception:
-            app_log.exception("failed to load symbol price precisions; using defaults")
+        for attempt in range(1, retries + 1):
+            try:
+                async with self._client.session.get(
+                    f"{self._client.rest_url}/api/v3/exchangeInfo",
+                    params=params, headers=self._client.rest_headers,
+                    ssl=False if self._client.rest_headers else self.settings.verify_ssl,
+                ) as response:
+                    response.raise_for_status()
+                    payload = await response.json()
+                loaded = 0
+                for item in payload.get("symbols", []):
+                    rule = next((rule for rule in item.get("filters", []) if rule.get("filterType") == "PRICE_FILTER"), None)
+                    if rule:
+                        tick_size = rule["tickSize"].rstrip("0")
+                        self._price_precisions[item["symbol"]] = len(tick_size.split(".", 1)[1]) if "." in tick_size else 0
+                        loaded += 1
+                app_log.info("price precisions loaded symbols=%d attempt=%d", loaded, attempt)
+                return loaded > 0
+            except Exception:
+                if attempt == retries:
+                    app_log.exception("failed to load symbol price precisions after %d attempts; using defaults", retries)
+                else:
+                    app_log.warning("price precision load failed attempt=%d/%d; retrying", attempt, retries, exc_info=True)
+                    await asyncio.sleep(2 ** (attempt - 1))
+        return False
+
+    async def reload_price_precisions(self) -> bool:
+        return await self._load_price_precisions()
 
     async def stop(self) -> None:
         self._stop.set()

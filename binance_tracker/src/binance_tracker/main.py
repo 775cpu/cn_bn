@@ -62,6 +62,17 @@ def chart_history(response, symbol, interval, end_time, limit=100):
     response.set_header("Content-Type", "application/json; charset=utf-8")
     response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
 
+def reload_price_precisions():
+    if not tracker._loop or not tracker._client:
+        return {"ok": False, "error": "行情服务尚未准备完成", "price_precisions": dict(tracker._price_precisions)}
+    future = asyncio.run_coroutine_threadsafe(tracker.reload_price_precisions(), tracker._loop)
+    try:
+        loaded = future.result(timeout=30)
+    except Exception as exc:
+        logging.getLogger("error").exception("manual price precision reload failed")
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "price_precisions": dict(tracker._price_precisions)}
+    return {"ok": loaded, "price_precisions": dict(tracker._price_precisions)}
+
 def resolve_verify_ssl(mode: str, configured: bool, insecure: bool = False) -> bool:
     if insecure:
         return False
