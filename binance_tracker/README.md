@@ -21,7 +21,7 @@ export BINANCE_HTTP_PROXY=http://127.0.0.1:7890
 export BINANCE_WS_PROXY=http://127.0.0.1:7890
 ```
 
-日志位于 `logs/`。每个标的都有独立的 `calibration_<SYMBOL>.log`，记录校准开始、完成、字段级 live/rest 差异和异常；公共日志包括 `app.log`、`network.log`、`calibration.log`、`error.log`。
+日志位于 `logs/`。每个标的都有独立的 `_<SYMBOL>.log`，记录校准开始、完成、字段级 live/rest 差异和异常；公共日志包括 `app.log`、`network.log`、`error.log`。
 
 Windows 上使用官方 `python-binance` 客户端时，先导入 `B` 即可安装 IP 直连补丁；它会读取 `config.py` 的 `REST_IPS`，选择最低延迟地址，并自动设置 `Host: api.binance.com`：
 

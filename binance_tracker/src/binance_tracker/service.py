@@ -214,6 +214,7 @@ class BinanceTracker:
 
     async def _mismatch_loop(self) -> None:
         while not self._stop.is_set():
+            started = time.monotonic()
             app_log.info(
                 "periodic calibration started symbols=%s intervals=%s history_limit=%d interval_seconds=%d",
                 sorted(self._symbols),
@@ -221,8 +222,8 @@ class BinanceTracker:
                 self.settings.history_limit,
                 self.settings.mismatch_check_seconds,
             )
-            for symbol in tuple(self._symbols):
-                await self._check_mismatch_symbol(symbol)
+            await asyncio.gather(*(self._check_mismatch_symbol(symbol) for symbol in tuple(self._symbols)))
+            app_log.info("periodic calibration completed elapsed_seconds=%.1f", time.monotonic() - started)
             try:
                 await asyncio.wait_for(self._stop.wait(), self.settings.mismatch_check_seconds)
             except asyncio.TimeoutError:

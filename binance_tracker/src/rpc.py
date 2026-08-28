@@ -137,7 +137,7 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
     websocket_path = '/ws'
     redirect_root = None
     def log_message(self, format, *args):
-        print(f"[RPC] {stime()}  {self.client_address[0]}:{self.client_address[1]} - {format % args}")
+        print(f"[RPC] {stime()[12:]}  {self.client_address[0]}:{self.client_address[1]} {format % args}")
     def do_GET(self):
         websocket_path = self.path.split('?', 1)[0]
         websocket_handler = self.websocket_handlers.get(websocket_path, self.websocket_handler)
@@ -305,7 +305,7 @@ def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None,
     thread = threading.Thread(target=server.serve_forever, name='RPC_Server', daemon=daemon)
     thread.start()
     server.thread = thread
-    print(f"[RPC server] at http://{ip}:{port}/{key}")
+    print(f"[RPC] {stime()} server at http://{ip}:{port}/{key}")
     return server
 
 def qpsu(url="http://192.168.1.100/D%3A/test/qpsu.zip",write_to=''):

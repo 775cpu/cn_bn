@@ -15,6 +15,17 @@ fi
 if ! python -c "import aiohttp" &>/dev/null; then
     echo "检测到缺少依赖，正在自动安装 pyproject.toml ..."
     python -m pip install -e . --quiet
+
+    git clone --depth=1 https://github.com/qgb/qpsu /workspaces/cn_bn/binance_tracker/src/qgb     
+    rm -f \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/bokeh_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/pdb_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/pebble_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/pysmb_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/skidl_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/tantivy_test.py \
+/workspaces/cn_bn/binance_tracker/src/qgb/tests/whoosh_test.py
+
 else
     echo "依赖已满足，跳过安装"
 fi

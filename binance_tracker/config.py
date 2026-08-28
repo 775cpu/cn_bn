@@ -1,7 +1,7 @@
 """Binance Tracker 本地配置。此文件是 Python 代码，可直接修改后启动。"""
 
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "SOLUSDT", "DOGEUSDT", "DOTUSDT", "MATICUSDT", "LTCUSDT"]
-# SYMBOLS = ["BTCUSDT","BNBUSDT",]
+SYMBOLS = ["BTCUSDT","BNBUSDT",]
 
 # 网络：默认使用旧版 k.py / ws_agg.py 的 IP 池，启动时自动选择最低延迟地址。
 NETWORK_MODE = "direct"  # direct / domain / proxy
@@ -31,7 +31,7 @@ LOG_MAX_BYTES = 10 * 1024 * 1024
 LOG_BACKUP_COUNT = 5
 
 # 显示：in_place 原地刷新，append 持续追加，off 关闭行情显示。
-DISPLAY_MODE = "in_place"
+DISPLAY_MODE = "off"
 DISPLAY_ONLY_BREAKOUTS = True
 DISPLAY_PRICE_DECIMALS = 8
 DISPLAY_BOLL_DECIMALS = 8
