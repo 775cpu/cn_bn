@@ -214,6 +214,13 @@ class BinanceTracker:
 
     async def _mismatch_loop(self) -> None:
         while not self._stop.is_set():
+            app_log.info(
+                "periodic calibration started symbols=%s intervals=%s history_limit=%d interval_seconds=%d",
+                sorted(self._symbols),
+                ",".join(self.settings.intervals),
+                self.settings.history_limit,
+                self.settings.mismatch_check_seconds,
+            )
             for symbol in tuple(self._symbols):
                 await self._check_mismatch_symbol(symbol)
             try:
