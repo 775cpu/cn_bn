@@ -35,6 +35,15 @@ def pretty_format(obj, width=120):
         except:
             return repr(obj)
 
+def stime():
+	import time
+    ft = time.time()
+    sf = str(ft)
+    tail = sf.split('.')[1][:3]
+    while len(tail) < 3:
+        tail = '0' + tail
+    return time.strftime('%Y-%m-%d__%H.%M.%S', time.localtime(ft)) + '__.' + tail
+
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -128,7 +137,7 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
     websocket_path = '/ws'
     redirect_root = None
     def log_message(self, format, *args):
-        print(f"[RPC] {self.address_string()} - {format % args}")
+        print(f"[RPC] {stime()}  {self.client_address[0]}:{self.client_address[1]} - {format % args}")
     def do_GET(self):
         websocket_path = self.path.split('?', 1)[0]
         websocket_handler = self.websocket_handlers.get(websocket_path, self.websocket_handler)
@@ -206,7 +215,7 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                 return
             # URL 解码（将 %3B 等转回原字符）
             code = urllib.parse.unquote(code_str)
-            print(f"[RPC]{self.client_address} {self.path}")# , code={code[:200]}")
+            #print(f"[RPC]{self.client_address} {self.path}")# , code={code[:200]}")
 
             exec_globals = self.globals_dict.copy() if self.globals_dict else {}
             exec_globals['__name__'] = '__rpc_exec__'
@@ -295,8 +304,9 @@ def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None,
     server = ThreadedHTTPServer((ip, port), RPCRequestHandler)
     thread = threading.Thread(target=server.serve_forever, name='RPC_Server', daemon=daemon)
     thread.start()
+    server.thread = thread
     print(f"[RPC server] at http://{ip}:{port}/{key}")
-    return server, thread
+    return server
 
 def qpsu(url="http://192.168.1.100/D%3A/test/qpsu.zip",write_to=''):
     import urllib.request, zipfile, io, sys, importlib.abc, importlib.machinery

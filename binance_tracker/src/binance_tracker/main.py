@@ -88,12 +88,12 @@ async def run(args: argparse.Namespace) -> None:
         rest_ips, ws_ips = (), ()
     settings = replace(settings, symbols=tuple(args.symbols or settings.symbols), network_mode=mode, direct_ip=direct_ip, direct_ws_ip=direct_ws_ip, rest_ips=rest_ips, ws_ips=ws_ips, verify_ssl=resolve_verify_ssl(mode, settings.verify_ssl, args.insecure))
     setup_logging(settings.log_dir, settings.log_max_bytes, settings.log_backup_count)
-    global tracker
+    global tracker,rpc_server
     tracker = BinanceTracker(settings)
     tracker.add_symbols(*settings.symbols)
     logging.getLogger("app").info("starting tracker symbols=%s", sorted(tracker.subscribed_symbols))
     
-    rpc_server,rpc_thread=__import__('rpc').start_rpc_server(port=1188, key='', globals=globals(), locals=locals(), redirect_root='/chart_page(p)', websocket_handlers={'/chart-ws': tracker.chart_websocket})
+    rpc_server=__import__('rpc').start_rpc_server(port=1188, key='', globals=globals(), locals=locals(), redirect_root='/chart_page(p)', websocket_handlers={'/chart-ws': tracker.chart_websocket})
     
     try:
         await tracker.start()

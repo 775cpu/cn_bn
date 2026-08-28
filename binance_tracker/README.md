@@ -4,6 +4,8 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna
 
 cd binance_tracker/src/;git clone --depth=1 https://github.com/qgb/qpsu qgb
 
+curl "http://127.0.0.1:1188/r=tracker.display.mode='off'"
+
 import%20binance,B,qgb;r=B
 r=B.get_24hr_ticker()
 r=B.futures_get_all_price_dict()
