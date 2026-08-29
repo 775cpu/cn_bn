@@ -1,4 +1,4 @@
-import sys, io, urllib.parse, threading, traceback, struct, base64, hashlib, socket, logging
+import sys, io, urllib.parse, threading, traceback, struct, base64, hashlib, socket, logging, asyncio, textwrap, inspect, ast
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
@@ -136,8 +136,11 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
     websocket_handlers = {}
     websocket_path = '/ws'
     redirect_root = None
+    main_loop = None  # 记录主线程的 event loop
+    
     def log_message(self, format, *args):
         print(f"[RPC] {stime()[12:]}  {self.client_address[0]}:{self.client_address[1]} {format % args}")
+        
     def do_GET(self):
         websocket_path = self.path.split('?', 1)[0]
         websocket_handler = self.websocket_handlers.get(websocket_path, self.websocket_handler)
@@ -162,7 +165,6 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
         self.handle_rpc()
 
     def handle_websocket(self, websocket_handler):
-        # 【关键修复】：强制修改服务器响应版本，满足 iOS Safari 的严格标准
         self.protocol_version = 'HTTP/1.1' 
         
         key = self.headers.get('Sec-WebSocket-Key')
@@ -170,18 +172,15 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             self.send_error(400, 'WebSocket version 13 and key are required')
             return
             
-        # 生成 accept key
         accept = base64.b64encode(hashlib.sha1(
             (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode('ascii')
         ).digest()).decode('ascii')
         
-        # 因为上面改了版本号，这里发出去的就会是 HTTP/1.1 101 Switching Protocols
         self.send_response(101, 'Switching Protocols')
         self.send_header('Upgrade', 'websocket')
         self.send_header('Connection', 'Upgrade')
         self.send_header('Sec-WebSocket-Accept', accept)
         self.end_headers()
-        # ... 后续进入 WebSocket 的收发循环
         
         websocket = WebSocket(self)
         try:
@@ -192,20 +191,45 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             traceback.print_exc()
         finally:
             websocket.close()
+            
     def do_POST(self):
         self.handle_rpc()
+        
+    def _execute_coroutine(self, coro, exec_globals):
+        """核心机制：将协程抛给主业务的事件循环执行，彻底解决 aiohttp 跨线程/未在 task 中运行的问题"""
+        target_loop = self.main_loop
+        # 如果启动时没指定 loop，尝试在全局变量里智能寻找（比如 tracker._loop）
+        if not target_loop or not target_loop.is_running():
+            for v in exec_globals.values():
+                if hasattr(v, '_loop') and isinstance(v._loop, asyncio.AbstractEventLoop) and v._loop.is_running():
+                    target_loop = v._loop
+                    break
+                if isinstance(v, asyncio.AbstractEventLoop) and v.is_running():
+                    target_loop = v
+                    break
+
+        if target_loop and target_loop.is_running():
+            # 使用 threadsafe 会自动将其包裹为 Task 执行，满足 aiohttp 要求
+            future = asyncio.run_coroutine_threadsafe(coro, target_loop)
+            return future.result() 
+        else:
+            # 降级方案：当前线程如果没有找到主循环，就新建一个（不适用于依赖上下文的库如 aiohttp）
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
     def handle_rpc(self):
         try:
-            # 原始路径（包括查询字符串），不做任何解析
             raw_path = self.path
-            # 去掉开头的斜杠
-            # 验证并去除 key 前缀（如果设置了 key）
             if self.key:
                 prefix = self.key + '/'
                 if not raw_path.startswith(prefix):
                     self.send_error(403, "Forbidden")
                     return
-                code_str = raw_path[len(prefix):]  # 去除 key/ 后剩余部分（可能包含 ?）
+                code_str = raw_path[len(prefix):]  
             else:            
                 if raw_path.startswith('/'):
                     raw_path = raw_path[1:]
@@ -213,9 +237,7 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
             if not code_str:
                 self.send_error(400, "No code")
                 return
-            # URL 解码（将 %3B 等转回原字符）
             code = urllib.parse.unquote(code_str)
-            #print(f"[RPC]{self.client_address} {self.path}")# , code={code[:200]}")
 
             exec_globals = self.globals_dict.copy() if self.globals_dict else {}
             exec_globals['__name__'] = '__rpc_exec__'
@@ -240,10 +262,43 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                     old_stdout = sys.stdout
                     sys.stdout = io.StringIO()
                     try:
-                        exec(code, exec_globals,self.locals_dict)
+                        try:
+                            compiled_code = compile(code, '<rpc>', 'exec')
+                            exec(compiled_code, exec_globals, self.locals_dict)
+                        except SyntaxError as se:
+                            if 'await' in code:
+                                indented_code = textwrap.indent(code, '    ')
+                                try:
+                                    dummy_tree = ast.parse(f"async def _():\n{indented_code}")
+                                    body = dummy_tree.body[0].body
+                                    is_single_expr = (len(body) == 1 and isinstance(body[0], ast.Expr))
+                                except Exception:
+                                    is_single_expr = False
+
+                                if is_single_expr:
+                                    async_code = f"async def __rpc_async__():\n    return ({code})"
+                                else:
+                                    async_code = f"async def __rpc_async__():\n{indented_code}\n    return locals()"
+
+                                exec_globals_async = exec_globals.copy()
+                                exec_globals_async.update(self.locals_dict)
+                                exec(async_code, exec_globals_async, self.locals_dict)
+                                coro_func = self.locals_dict.pop('__rpc_async__')
+                                coro = coro_func()
+
+                                # 核心：派发执行
+                                res_locals = self._execute_coroutine(coro, exec_globals)
+                                
+                                if isinstance(res_locals, dict):
+                                    self.locals_dict.update(res_locals)
+                                elif res_locals is not None:
+                                    self.locals_dict['r'] = res_locals
+                            else:
+                                raise se
                         output = sys.stdout.getvalue()
                     finally:
                         sys.stdout = old_stdout
+
                 if resp.data is not None:
                     result_obj = resp.data
                 elif 'r' in self.locals_dict:
@@ -254,6 +309,13 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                     result_obj = output
                 else:
                     result_obj = f"no 'r' variable, locals keys: {list(exec_globals.keys())}"
+
+                # 处理直接赋值未写 await，但得到一个 coroutine 的情况（例如: r = tracker.get_klines() ）
+                if inspect.isawaitable(result_obj):
+                    result_obj = self._execute_coroutine(result_obj, exec_globals)
+                    if 'r' in self.locals_dict and inspect.isawaitable(self.locals_dict.get('r')):
+                        self.locals_dict['r'] = result_obj
+
                 result_str = pretty_format(result_obj)
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
@@ -265,11 +327,11 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                     self.client_address, self.path, code[:500],
                 )
                 self.send_response(500)
-            # 如果没有设置 Content-Type，则添加默认的
+            
             if 'Content-Type' not in resp.headers:
                 self.send_header('Content-Type', 'text/plain; charset=utf-8')
             self.end_headers()
-            # 如果用户通过 set_data 设置了响应体，优先使用它
+            
             if resp.data is not None:
                 body = resp.data
                 if isinstance(body, str):
@@ -289,7 +351,8 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
 
 def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None, daemon=True,
                      favicon_rgb=None, favicon_size=16, websocket_handler=None,
-                     websocket_path='/ws', redirect_root=None, websocket_handlers=None):
+                     websocket_path='/ws', redirect_root=None, websocket_handlers=None,
+                     main_loop=None): # <--- 增加了 main_loop 参数
     if not key:key = ''
     RPCRequestHandler.key = key
     RPCRequestHandler.globals_dict = globals if globals else {}
@@ -298,6 +361,8 @@ def start_rpc_server(port=1133, key='', ip='0.0.0.0', globals=None, locals=None,
     RPCRequestHandler.websocket_path = websocket_path
     RPCRequestHandler.websocket_handlers = websocket_handlers or {}
     RPCRequestHandler.redirect_root = redirect_root
+    RPCRequestHandler.main_loop = main_loop # 绑定主循环
+    
     if favicon_rgb is None:
         favicon_rgb = (port // 100, port % 100, 0)
     RPCRequestHandler.favicon_bytes = get_bmp_bytes(rgb=favicon_rgb, size=favicon_size)
@@ -315,26 +380,26 @@ def qpsu(url="http://192.168.1.100/D%3A/test/qpsu.zip",write_to=''):
     class ZipImporter(importlib.abc.PathEntryFinder):
         def __init__(self, zf): self.zf = zf
         def find_spec(self, fullname, path=None, target=None):
-            pkg_path = fullname.replace('.', '/') + '/__init__.py'  # 检查是否为包（有 __init__.py）
+            pkg_path = fullname.replace('.', '/') + '/__init__.py'  
             if pkg_path in self.zf.namelist():
                 return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
-            mod_path = fullname.replace('.', '/') + '.py'  # 检查是否为普通模块
+            mod_path = fullname.replace('.', '/') + '.py'  
             if mod_path in self.zf.namelist():
                 return importlib.machinery.ModuleSpec(fullname, self)
             return None
         def create_module(self, spec): return None
         def exec_module(self, module):
             fullname = module.__name__
-            pkg_path = fullname.replace('.', '/') + '/__init__.py'  # 先尝试作为包加载 __init__.py
+            pkg_path = fullname.replace('.', '/') + '/__init__.py'  
             if pkg_path in self.zf.namelist():
                 code = self.zf.read(pkg_path).decode('utf-8')
-                module.__path__ = []  # 标记为包
-                module.__file__ = f"<zip://{pkg_path}>"  # 修复 __file__ 未定义
+                module.__path__ = []  
+                module.__file__ = f"<zip://{pkg_path}>"  
                 exec(code, module.__dict__)
                 return
             mod_path = fullname.replace('.', '/') + '.py'
             code = self.zf.read(mod_path).decode('utf-8')
-            module.__file__ = f"<zip://{mod_path}>"  # 修复 __file__ 未定义
+            module.__file__ = f"<zip://{mod_path}>"  
             exec(code, module.__dict__)
     sys.meta_path.insert(0, ZipImporter(z))
     from qgb import py,U,T,N,F

@@ -7,6 +7,7 @@ from pathlib import Path
 from .config import Settings
 from .logging_setup import setup_logging
 from .service import BinanceTracker
+import rpc
 
 def chart_page(response, symbol=None, interval=None):
     symbol = str(symbol or next(iter(tracker.subscribed_symbols), "BTCUSDT")).upper()
@@ -155,7 +156,7 @@ async def run(args: argparse.Namespace) -> None:
     tracker = BinanceTracker(settings)
     tracker.add_symbols(*settings.symbols)
     logging.getLogger("app").info("starting tracker symbols=%s", sorted(tracker.subscribed_symbols))
-    
+    #此时的 tracker._loop 还是None
     rpc_server=__import__('rpc').start_rpc_server(port=1188, key='', globals=globals(), locals=locals(), redirect_root='/chart_page(p)', websocket_handlers={'/chart-ws': tracker.chart_websocket})
     
     try:
