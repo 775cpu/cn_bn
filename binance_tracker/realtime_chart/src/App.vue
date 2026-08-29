@@ -78,7 +78,15 @@ export default {
     return {
       chart: null, socket: null, reconnectTimer: null, connected: false,
       symbol: window.__INITIAL_SYMBOL__ || 'BTCUSDT', interval: window.__INITIAL_INTERVAL__ || '1m', bars: [],
-      autoScale: true, scaleLocked: false, pricePrecision: 8, latency: '--', serverTime: '--', pendingHistory: null, historyRetryTimer: null, historyRetryCount: 0, requestedHistory: new Set(), historyExhausted: false, chartGeneration: 0,
+      autoScale: true, scaleLocked: false, pricePrecision: 8, latency: '--', serverTime: '--', serverTimeMs: 0,
+      pendingHistory: null, historyRetryTimer: null, historyRetryCount: 0, requestedHistory: new Set(), historyExhausted: false, chartGeneration: 0,
+      // liveTail=true: the view follows the newest forming bar (WS appends); false: anchored to a history window (REST paging both ways)
+      liveTail: true,
+      // locating=true between applyNewData and the post-ready scroll: suppresses edge-triggered paging from the transient "end of data" view
+      locating: false,
+      // appendingNewer=true while a backward page is fed into the chart: the library re-enters the
+      // edge callback synchronously inside addData(); use it to stop one user drag from chain-loading pages.
+      appendingNewer: false,
       symbols: window.__SYMBOLS__ || ['BTCUSDT'],
       intervals: window.__INTERVALS__ || ['1m'],
       newSymbol: '', addingSymbol: false, footLog: '', footLogError: false, footLogTimer: null,
@@ -86,6 +94,8 @@ export default {
       tickerTime: Number(window.__TICKER_TIME__) || 0,
       loadingTickers: false, showTickerPanel: false, showSymbolMenu: false,
       crosshairBar: null, contextMenu: null, drilling: false, drillTarget: null,
+      // URL time anchor (ms): shared deep link to a specific bar; focusTarget is one-shot after each snapshot
+      urlTime: Number(window.__INITIAL_TIME__) || 0, focusTarget: Number(window.__INITIAL_TIME__) || 0, urlSyncTimer: null,
       tickerSortKey: 'pct', tickerSortDesc: true,
       tickerSortOptions: [
         { key: 'pct', label: '涨跌幅', hint: '按 24h 涨跌幅绝对值排序（再点切换正/倒序）' },
@@ -155,34 +165,53 @@ export default {
     this.chart = init(this.$refs.chart);
     this.chart.setTimezone('Asia/Shanghai');
     this.chart.setStyles({ grid: { horizontal: { color: '#263238' }, vertical: { color: '#263238' } }, candle: { type: 'candle_solid', bar: { upColor: '#35c99a', downColor: '#ef6b73', noChangeColor: '#9aa6ab' } } });
+    // Crosshair candle tooltip: OHLCV plus per-bar 涨跌OC (close vs open) and 振幅HL ((high-low)/open).
+    this.chart.setStyles({ candle: { tooltip: { custom: (data, styles) => this.candleTooltipLegends(data, styles) } } });
     this.chart.createIndicator({ name: 'BOLL', calcParams: [21, 3] }, false, { id: 'candle_pane' });
     this.chart.createIndicator('VOL');
-    // Track the bar under the crosshair so the right-click menu can drill into it.
+    // Track the bar under the crosshair so the right-click menu can drill into it;
+    // crosshair moves also refresh the URL time anchor (debounced).
     this.chart.subscribeAction(ActionType.OnCrosshairChange, (data) => {
       this.crosshairBar = data?.kLineData || null;
+      if (data?.kLineData?.timestamp) this.scheduleUrlTimeSync();
     });
+    // Dragging back through history keeps the URL anchored to what is displayed.
+    this.chart.subscribeAction(ActionType.OnVisibleRangeChange, () => this.scheduleUrlTimeSync());
     this.chart.setLoadDataCallback(({ type, data, callback }) => {
-      if (type !== 'forward') {
+      const list = this.chart.getDataList();
+      if (type === 'forward') {
+        // Left edge: page towards older bars.
+        const endTime = data?.timestamp ?? list[0]?.timestamp;
+        if (!Number.isFinite(endTime) || this.historyExhausted) {
+          callback([], false);
+          return;
+        }
+        this.requestHistory(endTime, callback);
+      } else if (type === 'backward') {
+        // Right edge: page towards newer bars; once caught up with the live bar, WS updates take over.
+        const startTime = data?.timestamp ?? list[list.length - 1]?.timestamp;
+        if (!Number.isFinite(startTime)) {
+          callback([], false);
+          return;
+        }
+        this.requestNewerHistory(startTime, callback);
+      } else {
         callback([], false);
-        return;
       }
-      const endTime = data?.timestamp ?? this.chart.getDataList()[0]?.timestamp;
-      if (!Number.isFinite(endTime) || this.historyExhausted) {
-        callback([], false);
-        return;
-      }
-      this.requestHistory(endTime, callback);
     });
+    // Keep a visible gap (~15 bars) between the newest bar and the right edge so it reads as "latest".
+    this.chart.setOffsetRightDistance(120);
     this.updateAxisMode();
     this.connect();
   },
-  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearTimeout(this.footLogTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
+  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearTimeout(this.footLogTimer); clearTimeout(this.urlSyncTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
   methods: {
     log(event, details) {
       // Notable events are mirrored to the footer log label; high-frequency debug
       // events (ws-message/update/pong/history-applied...) stay console-only.
       const footMessages = {
         'history-rpc-error': ['历史行情加载失败', true],
+        'newer-rpc-error': ['历史行情加载失败', true],
         'ws-error': ['WebSocket 连接异常，正在重连…', true],
         'server-error': [`服务器错误：${details?.message || ''}`, true],
         'history-rejected-gap': ['历史行情存在缺口，已跳过不连续部分', false],
@@ -200,6 +229,35 @@ export default {
       // Temporary log label: revert to the default "WebSocket stream" hint after a few seconds.
       if (message) this.footLogTimer = setTimeout(() => { this.footLog = ''; }, isError ? 60*1000 : 10*1000);
     },
+    // klinecharts candle tooltip custom callback: full replacement of the default OHLCV
+    
+    candleTooltipLegends(data, styles) {
+      const d = data?.current || {};
+      const price = (v) => Number.isFinite(v)
+        ? Number(v).toLocaleString(undefined, { minimumFractionDigits: this.pricePrecision, maximumFractionDigits: this.pricePrecision })
+        : '--';
+      const prevClose = data?.prev?.close;
+      const chg = Number.isFinite(prevClose) && prevClose !== 0 && Number.isFinite(d.close) ? (d.close - prevClose) / prevClose * 100 : null;
+      const oc = Number.isFinite(d.open) && d.open !== 0 && Number.isFinite(d.close) ? (d.close - d.open) / d.open * 100 : null;
+      const amp = Number.isFinite(d.open) && d.open !== 0 && Number.isFinite(d.high) && Number.isFinite(d.low) ? (d.high - d.low) / d.open * 100 : null;
+      const up = styles?.priceMark?.last?.upColor || '#35c99a';
+      const down = styles?.priceMark?.last?.downColor || '#ef6b73';
+      const flat = styles?.priceMark?.last?.noChangeColor || '#9aa6ab';
+      const chgColor = chg == null ? flat : chg > 0 ? up : chg < 0 ? down : flat;
+      const ocColor = oc == null ? flat : oc > 0 ? up : oc < 0 ? down : flat;
+      const pct = (v) => `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`;
+      return [
+        { title: 'Time', value: d.timestamp ? this.formatTime(d.timestamp) : '--' },
+        { title: 'Open', value: price(d.open) },
+        { title: 'High', value: price(d.high) },
+        { title: 'Low', value: price(d.low) },
+        { title: 'Close', value: price(d.close) },
+        { title: 'Volume', value: Number.isFinite(d.volume) ? this.formatVolume(d.volume) : '--' },
+        { title: '涨跌', value: { text: chg == null ? '--' : pct(chg), color: chgColor } },
+        { title: 'OC', value: { text: oc == null ? '--' : pct(oc), color: ocColor } },
+        { title: '振幅HL', value: { text: amp == null ? '--' : `${amp.toFixed(2)}%`, color: '#e8c15e' } },
+      ];
+    },
     formatTime(timestamp) {
       return new Intl.DateTimeFormat('zh-CN', {
         timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
@@ -214,6 +272,9 @@ export default {
     },
     toChartBar(bar) { return { timestamp: bar.open_time, open: bar.open, high: bar.high, low: bar.low, close: bar.close, volume: bar.volume }; },
     requestHistory(endTime, callback, auto = false) {
+      // While a programmatic locate is in flight the transient view may touch an edge; skip it
+      // (more=true keeps the paging flag so a real user drag still triggers afterwards).
+      if (this.locating) { callback([], true); return; }
       const requestKey = `${this.symbol}:${this.interval}:${endTime}`;
       if (this.pendingHistory || this.requestedHistory.has(requestKey)) {
         this.log('history-skip-duplicate', { requestKey });
@@ -267,22 +328,84 @@ export default {
         }
       });
     },
-    autoLoadHistory() {
-      if (this.pendingHistory || this.historyExhausted) return;
-      const visible = this.chart.getVisibleRange();
-      if (visible && visible.from > 0) {
-        this.log('history-auto-stop', { reason: 'viewport-filled', visible });
+    requestNewerHistory(startTime, callback) {
+      // Skip edge-triggered paging while a programmatic locate (focus/drill) is still landing.
+      if (this.locating || this.appendingNewer) { callback([], true); return; }
+      // Live mode: new buckets arrive over WS; never page REST at the live right edge.
+      if (this.liveTail) { callback([], false); return; }
+      const step = this.intervalStep() || 32 * 86400000;
+      const list = this.chart.getDataList();
+      const last = list[list.length - 1];
+      // Newest loaded bar already is (or past) the current forming bucket: live WS updates take over.
+      if (last && this.serverTimeMs && last.timestamp + step > this.serverTimeMs) {
+        this.liveTail = true;
+        callback([], false);
         return;
       }
-      const firstBar = this.chart.getDataList()[0];
-      if (firstBar) {
-        const endTime = firstBar.timestamp;
-        this.requestHistory(endTime, (bars, more) => {
-          this.chart.applyMoreData(bars, more, () => {
-            if (more) this.autoLoadHistory();
-          });
-        }, true);
+      const requestKey = `newer:${this.symbol}:${this.interval}:${startTime}`;
+      if (this.pendingHistory || this.requestedHistory.has(requestKey)) {
+        this.log('history-skip-duplicate', { requestKey });
+        callback([], true); // keep backwardMore=true so the next drag retries
+        return;
       }
+      this.pendingHistory = { requestKey, callback, generation: this.chartGeneration };
+      this.requestedHistory.add(requestKey);
+      // First bucket after the newest loaded bar; Binance may return the bucket containing it, filtered client-side.
+      const expression = `chart_history(p,symbol='${this.symbol}',interval='${this.interval}',start_time=${startTime + step},limit=500)`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('newer-rpc-request', { url });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        if (!this.pendingHistory || this.pendingHistory.generation !== this.chartGeneration) return;
+        const existing = new Set(this.chart.getDataList().map((bar) => bar.timestamp));
+        const newer = (data.bars || [])
+          .map((bar) => this.toChartBar(bar))
+          .filter((bar) => Number.isFinite(bar.timestamp) && bar.timestamp > startTime && !existing.has(bar.timestamp))
+          .sort((a, b) => a.timestamp - b.timestamp);
+        const newest = newer[newer.length - 1]?.timestamp ?? startTime;
+        // Caught up when the page is short or the newest fetched bucket covers the server clock.
+        const caughtUp = newer.length < 500 || (this.serverTimeMs > 0 && newest + step > this.serverTimeMs);
+        const pendingCallback = this.pendingHistory.callback;
+        this.pendingHistory = null;
+        if (newer.length) {
+          const merged = new Map(this.bars.concat(newer).map((bar) => [bar.timestamp, bar]));
+          this.bars = Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        }
+        if (caughtUp) this.liveTail = true;
+        const appendGen = this.chartGeneration;
+        // addData() re-enters this edge callback synchronously while appending; appendingNewer
+        // answers the re-entry with an empty page so one user drag cannot chain-load pages.
+        this.appendingNewer = true;
+        try {
+          pendingCallback(newer, !caughtUp);
+        } finally {
+          this.appendingNewer = false;
+        }
+        if (caughtUp) {
+          // Snap back to the live edge: newest bar with the right-side gap, WS takes over from here.
+          this.chart.scrollToRealTime(0);
+        } else if (newer.length) {
+          // One page per user gesture: once the append settles, leave the last few bars just
+          // off-screen right so `to < total`; the library stops loading until the user drags again.
+          // A programmatic locate (focus/drill) leaves the viewport mid-list, in which case do nothing.
+          const settle = () => {
+            this.chart.unsubscribeAction(ActionType.OnDataReady, settle);
+            if (this.chartGeneration !== appendGen || this.locating || this.liveTail) return;
+            const range = this.chart.getVisibleRange();
+            const total = this.chart.getDataList().length;
+            if (range.to >= total - 1) this.chart.scrollToDataIndex(total - 1 - 3, 0);
+          };
+          this.chart.subscribeAction(ActionType.OnDataReady, settle);
+        }
+        this.log('newer-applied', { bars: newer.length, more: !caughtUp, newest });
+      }).catch((error) => {
+        this.log('newer-rpc-error', { error: error.message || String(error) });
+        if (this.pendingHistory?.generation === this.chartGeneration) {
+          const pendingCallback = this.pendingHistory.callback;
+          this.pendingHistory = null;
+          pendingCallback([], true);
+        }
+      });
     },
     openTickerPanel() {
       this.showSymbolMenu = false;
@@ -438,11 +561,107 @@ export default {
         this.setFootLog(error.message || String(error), true);
       });
     },
+    pageUrl() {
+      let url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}'`;
+      if (this.urlTime) url += `,time=${this.urlTime}`;
+      return `${url})`;
+    },
     subscribe() {
-      const url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}')`;
-      history.replaceState({ symbol: this.symbol, interval: this.interval }, '', url);
-      this.log('subscribe', { symbol: this.symbol, interval: this.interval, url });
-      if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify({ type: 'subscribe', symbol: this.symbol, interval: this.interval }));
+      history.replaceState({ symbol: this.symbol, interval: this.interval, time: this.urlTime || null }, '', this.pageUrl());
+      this.log('subscribe', { symbol: this.symbol, interval: this.interval, urlTime: this.urlTime });
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        // Re-anchor the view to the URL time after interval/symbol switch (drill flow sets drillTarget instead).
+        if (!this.drillTarget) this.focusTarget = this.urlTime || 0;
+        this.socket.send(JSON.stringify({ type: 'subscribe', symbol: this.symbol, interval: this.interval }));
+      }
+    },
+    syncUrlTime(timestamp) {
+      if (!Number.isFinite(timestamp)) return;
+      this.urlTime = timestamp;
+      history.replaceState({ symbol: this.symbol, interval: this.interval, time: timestamp }, '', this.pageUrl());
+    },
+    scheduleUrlTimeSync() {
+      clearTimeout(this.urlSyncTimer);
+      this.urlSyncTimer = setTimeout(() => {
+        if (this.drilling) return;
+        let timestamp = this.crosshairBar?.timestamp;
+        if (!Number.isFinite(timestamp)) {
+          // No crosshair (dragging history): anchor to the rightmost visible bar so the view restores when reopening.
+          const range = this.chart?.getVisibleRange?.();
+          const list = this.chart?.getDataList?.() || this.bars;
+          const idx = Number.isInteger(range?.to) ? range.to : list.length - 1;
+          timestamp = list[Math.min(Math.max(idx, 0), list.length - 1)]?.timestamp;
+        }
+        if (Number.isFinite(timestamp)) this.syncUrlTime(timestamp);
+      }, 400);
+    },
+    locateAfterReady(timestamp) {
+      // applyNewData indexes asynchronously: scroll only once the data is ready, otherwise
+      // the view stays at the data end, the crosshair misses the anchor, and the transient
+      // end-edge view spuriously triggers a newer-bars page.
+      const gen = this.chartGeneration;
+      this.locating = true;
+      let fallback = 0;
+      const doLocate = () => {
+        if (!this.locating) return;
+        this.locating = false;
+        clearTimeout(fallback);
+        this.chart.unsubscribeAction(ActionType.OnDataReady, doLocate);
+        if (this.chartGeneration !== gen) return;
+        this.chart.scrollToTimestamp(timestamp, 0);
+        const pixel = this.chart.convertToPixel({ timestamp }, { paneId: 'candle_pane' });
+        if (pixel && Number.isFinite(pixel.x)) {
+          // Draws the crosshair line at the anchor; note: executeAction does NOT re-dispatch
+          // OnCrosshairChange, so the Vue-side anchor must be set explicitly below.
+          this.chart.executeAction(ActionType.OnCrosshairChange, { x: pixel.x, paneId: 'candle_pane' });
+        }
+        const anchorBar = this.chart.getDataList().find((item) => item.timestamp === timestamp) || null;
+        this.crosshairBar = anchorBar;
+        this.syncUrlTime(timestamp);
+      };
+      fallback = setTimeout(doLocate, 500);
+      this.chart.subscribeAction(ActionType.OnDataReady, doLocate);
+    },
+    focusOnTime() {
+      const timestamp = this.focusTarget;
+      if (!timestamp) return;
+      // One REST page (up to 1000 bars) ending ~500 bars AFTER the anchor: after scrollToTimestamp
+      // the target sits at the right edge with newer bars off-screen, so the chart's right-edge
+      // (Backward) paging does NOT auto-chain all the way to live (that storm froze the page on 1s).
+      const step = this.intervalStep() || 32 * 86400000;
+      const endTime = timestamp + 500 * step;
+      const expression = `chart_history(p,symbol='${this.symbol}',interval='${this.interval}',end_time=${endTime},limit=1000)`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('focus-window-request', { url, target: timestamp });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        if (this.focusTarget !== timestamp) return;
+        const history = (data.bars || [])
+          .map((bar) => this.toChartBar(bar))
+          .filter((bar) => Number.isFinite(bar.timestamp))
+          .sort((a, b) => a.timestamp - b.timestamp);
+        if (!history.length) throw new Error('该时间附近没有可用 K 线');
+        // Replace, do NOT merge the live snapshot tail: otherwise a far-future last bar would
+        // break right-edge (backward) paging. Both directions page from this window.
+        this.bars = history;
+        this.chartGeneration += 1;
+        this.pendingHistory = null;
+        this.requestedHistory = new Set();
+        this.historyExhausted = false;
+        this.liveTail = false;
+        // Must be set BEFORE applyNewData: its edge paging callbacks fire synchronously inside the call.
+        this.locating = true;
+        this.chart.applyNewData(this.bars);
+        this.updateAxisMode();
+        this.locateAfterReady(timestamp);
+        this.focusTarget = 0;
+        this.syncUrlTime(timestamp);
+        this.setFootLog(`已定位到 ${this.formatTime(timestamp)}（URL time 锚点 · ${this.interval}，左右拖动可连续加载历史）`, false);
+      }).catch((error) => {
+        console.error('[realtime-chart] focus-window-error', error);
+        this.focusTarget = 0;
+        this.setFootLog('时间锚点定位失败: ' + (error.message || error), true);
+      });
     },
     updateAxisMode() {
       if (!this.chart) return;
@@ -474,32 +693,57 @@ export default {
         if (message.type === 'snapshot') {
           this.symbol = message.symbol; this.interval = message.interval;
           this.pricePrecision = Number.isInteger(message.price_precision) ? message.price_precision : 8;
+          this.serverTimeMs = Number(message.server_time) || this.serverTimeMs;
           this.serverTime = this.formatTime(message.server_time);
           this.bars = this.normalizeBars(message.bars.map((bar) => this.toChartBar(bar)));
           this.chartGeneration += 1;
           this.pendingHistory = null;
           this.requestedHistory = new Set();
           this.historyExhausted = false;
+          this.liveTail = true;
           this.chart.applyNewData(this.bars);
           this.updateAxisMode();
           if (this.drillTarget) this.openDrillWindow();
+          else if (this.focusTarget) this.focusOnTime();
+          else {
+            // No time anchor: the newest bar sits with a gap to the right edge, and the URL follows it.
+            const lastBar = this.bars[this.bars.length - 1];
+            if (lastBar) this.syncUrlTime(lastBar.timestamp);
+          }
         } else if (message.type === 'update') {
           const bar = this.toChartBar(message.bar);
+          this.serverTimeMs = Number(message.server_time) || this.serverTimeMs;
+          const last = this.bars[this.bars.length - 1];
           const index = this.bars.findIndex((item) => item.timestamp === bar.timestamp);
           if (index >= 0) {
             this.bars.splice(index, 1, bar);
             this.chart.updateData(bar);
-          } else if (!this.bars.length || bar.timestamp > this.bars[this.bars.length - 1].timestamp) {
+          } else if (this.liveTail && (!this.bars.length || (last && bar.timestamp > last.timestamp))) {
+            // Live tail: a new bucket starts forming -> append, and the URL time moves with it.
             this.bars.push(bar);
             this.chart.updateData(bar);
-          } else {
+            this.syncUrlTime(bar.timestamp);
+          } else if (!this.liveTail && last && bar.timestamp > last.timestamp) {
+            // History window: only accept the next contiguous bucket (means paging reached live);
+            // far-future live ticks while viewing old history are dropped.
+            const step = this.intervalStep() || 32 * 86400000;
+            if (bar.timestamp <= last.timestamp + step * 2) {
+              this.bars.push(bar);
+              this.chart.updateData(bar);
+              this.liveTail = true;
+              // Paging reached the live bucket: snap to the newest bar with the right-side gap.
+              this.chart.scrollToRealTime(0);
+              this.syncUrlTime(bar.timestamp);
+            }
+          } else if (this.liveTail && last && bar.timestamp < last.timestamp) {
             this.bars = this.normalizeBars(this.bars.concat(bar));
             this.chart.applyNewData(this.bars);
           }
           this.serverTime = this.formatTime(message.server_time);
-          this.log('realtime-update', { timestamp: bar.timestamp });
+          this.log('realtime-update', { timestamp: bar.timestamp, liveTail: this.liveTail });
         } else if (message.type === 'pong') {
           this.latency = `${Math.max(0, performance.now() - message.sent_at).toFixed(0)} ms`;
+          this.serverTimeMs = Number(message.server_time) || this.serverTimeMs;
           this.serverTime = this.formatTime(message.server_time);
           this.log('ws-pong', { latency: this.latency });
         } else if (message.type === 'error') {
@@ -546,6 +790,7 @@ export default {
           levels: Array.isArray(data.path) ? data.path.length : 0,
         };
         this.drillTarget = target;
+        this.focusTarget = 0;
         if (this.interval !== '1s') {
           // Switch the live stream to 1s; openDrillWindow runs once the fresh 1s snapshot arrives.
           this.interval = '1s';
@@ -575,21 +820,22 @@ export default {
           .map((bar) => this.toChartBar(bar))
           .filter((bar) => Number.isFinite(bar.timestamp))
           .sort((a, b) => a.timestamp - b.timestamp);
-        const merged = new Map(history.concat(this.bars).map((bar) => [bar.timestamp, bar]));
-        this.bars = Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        // Replace (like focusOnTime): no live snapshot tail, so right-edge paging walks newer 1s bars up to live.
+        this.bars = history;
         this.chartGeneration += 1;
         this.pendingHistory = null;
         this.requestedHistory = new Set();
         this.historyExhausted = false;
+        this.liveTail = false;
+        // Must be set BEFORE applyNewData: its edge paging callbacks fire synchronously inside the call.
+        this.locating = true;
         this.chart.applyNewData(this.bars);
         this.updateAxisMode();
-        this.chart.scrollToTimestamp(target.timestamp, 0);
-        const pixel = this.chart.convertToPixel({ timestamp: target.timestamp }, { paneId: 'candle_pane' });
-        if (pixel && Number.isFinite(pixel.x)) {
-          this.chart.executeAction(ActionType.OnCrosshairChange, { x: pixel.x, paneId: 'candle_pane' });
-        }
+        this.locateAfterReady(target.timestamp);
         this.drillTarget = null;
-        this.setFootLog(`已定位到 1s ${target.side === 'high' ? '最高' : '最低'}价 ${this.formatTickerPrice(target.price)} · ${this.formatTime(target.timestamp)}（服务端钻取 ${target.levels} 层，滚轮可继续看前后秒）`, false);
+        this.focusTarget = 0;
+        this.syncUrlTime(target.timestamp);
+        this.setFootLog(`已定位到 1s ${target.side === 'high' ? '最高' : '最低'}价 ${this.formatTickerPrice(target.price)} · ${this.formatTime(target.timestamp)}（服务端钻取 ${target.levels} 层，地址栏 time 已同步，可复制分享）`, false);
       }).catch((error) => {
         console.error('[realtime-chart] drill-window-error', error);
         this.drillTarget = null;

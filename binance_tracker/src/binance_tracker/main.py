@@ -9,34 +9,51 @@ from .logging_setup import setup_logging
 from .service import BinanceTracker, normalize_symbol
 import rpc
 
-def chart_page(response, symbol=None, interval=None):
+def chart_page(response, symbol=None, interval=None, time=None):
     symbol = str(symbol or next(iter(tracker.subscribed_symbols), "BTCUSDT")).upper()
     interval = str(interval or tracker.settings.intervals[0])
     if symbol not in tracker.books:
         symbol = next(iter(tracker.subscribed_symbols), "BTCUSDT")
     if interval not in tracker.settings.intervals:
         interval = tracker.settings.intervals[0]
+    # Optional ms-timestamp anchor: the frontend loads the history window around it
+    # and positions the view/crosshair there (shareable URL for a specific bar time).
+    try:
+        initial_time = int(time)
+    except (TypeError, ValueError):
+        initial_time = 0
+    if initial_time < 0:
+        initial_time = 0
     page = (Path(__file__).resolve().parents[2] / "realtime_chart" / "dist" / "index.html").read_text(encoding="utf-8")
     ticker_data = tracker.get_ticker24h()
-    page = page.replace("</head>", f"<script>window.__SYMBOLS__={json.dumps(sorted(tracker.subscribed_symbols))};window.__INTERVALS__={json.dumps(list(tracker.settings.intervals))};window.__INITIAL_SYMBOL__={json.dumps(symbol)};window.__INITIAL_INTERVAL__={json.dumps(interval)};window.__TICKERS__={json.dumps(ticker_data['tickers'], ensure_ascii=False)};window.__TICKER_TIME__={ticker_data['time']};</script></head>")
+    page = page.replace("</head>", f"<script>window.__SYMBOLS__={json.dumps(sorted(tracker.subscribed_symbols))};window.__INTERVALS__={json.dumps(list(tracker.settings.intervals))};window.__INITIAL_SYMBOL__={json.dumps(symbol)};window.__INITIAL_INTERVAL__={json.dumps(interval)};window.__INITIAL_TIME__={initial_time};window.__TICKERS__={json.dumps(ticker_data['tickers'], ensure_ascii=False)};window.__TICKER_TIME__={ticker_data['time']};</script></head>")
     response.set_header("Content-Type", "text/html; charset=utf-8")
     response.set_data(page)
 
-def chart_history(response, symbol, interval, end_time, limit=100):
-    """Return older bars through the existing RPC HTTP endpoint."""
+def chart_history(response, symbol, interval, end_time=0, limit=100, start_time=0):
+    """Return bars through the existing RPC HTTP endpoint.
+
+    end_time>0: bars strictly before it (older paging, forward in klinecharts terms);
+    start_time>0: bars at/after it (newer paging, backward when dragging right)."""
     symbol = str(symbol).upper()
     interval = str(interval)
     try:
         end_time = int(end_time)
+        start_time = int(start_time)
         limit = min(max(int(limit), 1), 1000)
     except (TypeError, ValueError, OverflowError):
         logging.getLogger("error").warning(
-            "invalid chart history arguments symbol=%r interval=%r end_time=%r limit=%r",
-            symbol, interval, end_time, limit,
+            "invalid chart history arguments symbol=%r interval=%r end_time=%r start_time=%r limit=%r",
+            symbol, interval, end_time, start_time, limit,
         )
         response.set_status(400)
         response.set_header("Content-Type", "application/json; charset=utf-8")
-        response.set_data(json.dumps({"error": "end_time 和 limit 必须是整数"}, ensure_ascii=False))
+        response.set_data(json.dumps({"error": "end_time、start_time 和 limit 必须是整数"}, ensure_ascii=False))
+        return
+    if end_time <= 0 and start_time <= 0:
+        response.set_status(400)
+        response.set_header("Content-Type", "application/json; charset=utf-8")
+        response.set_data(json.dumps({"error": "必须提供 end_time 或 start_time"}, ensure_ascii=False))
         return
     if symbol not in tracker.books or interval not in tracker.settings.intervals:
         response.set_status(400)
@@ -48,16 +65,19 @@ def chart_history(response, symbol, interval, end_time, limit=100):
         response.set_header("Content-Type", "application/json; charset=utf-8")
         response.set_data(json.dumps({"error": "行情服务尚未准备完成"}, ensure_ascii=False))
         return
-    future = asyncio.run_coroutine_threadsafe(
-        tracker._client.klines(symbol, interval, limit, end_time=end_time - 1),
-        tracker._loop,
-    )
+    if start_time > 0:
+        coro = tracker._client.klines(symbol, interval, limit, start_time=start_time)
+        rpc_desc = f"start_time={start_time}"
+    else:
+        coro = tracker._client.klines(symbol, interval, limit, end_time=end_time - 1)
+        rpc_desc = f"end_time={end_time}"
+    future = asyncio.run_coroutine_threadsafe(coro, tracker._loop)
     try:
         bars = [bar.as_dict() for bar in future.result(timeout=20)]
     except Exception:
         logging.getLogger("error").exception(
-            "chart history RPC failed symbol=%s interval=%s end_time=%d limit=%d",
-            symbol, interval, end_time, limit,
+            "chart history RPC failed symbol=%s interval=%s %s limit=%d",
+            symbol, interval, rpc_desc, limit,
         )
         response.set_status(502)
         bars = []
