@@ -49,6 +49,9 @@
             <span class="tc-pct" :class="item.priceChangePercent >= 0 ? 'up' : 'down'">{{ formatPct(item.priceChangePercent) }}</span>
           </button>
         </template>
+        <div v-if="newSymbol.trim() && !groupedTickers.length" class="ticker-empty">
+          「{{ newSymbol.trim() }}」无匹配交易对 —— 检查拼写；已下架/未上市/非现货的币不会出现在列表中
+        </div>
       </div>
       <footer v-if="tickerHiddenTotal > 0" class="ticker-panel-foot">部分组别仅显示涨跌幅最活跃的前 {{ tickerGroupCap }} 个（{{ tickerHiddenTotal }} 个已折叠），在输入框键入 symbol 可精确筛选</footer>
     </section>
@@ -341,7 +344,8 @@ export default {
         return;
       }
       this.newSymbol = item.symbol;
-      this.addSymbol(item.symbol);
+      // Row data comes from our own TRADING-filtered 24hr cache: format is guaranteed, skip manual regex.
+      this.addSymbol(item.symbol, true);
     },
     switchSymbol(symbol) {
       this.closePanels();
@@ -368,11 +372,18 @@ export default {
         this.showSymbolStatus(error.message || String(error), true);
       });
     },
-    addSymbol(explicitSymbol) {
+    // 与后端 normalize_symbol 同一规则：symbol 是单个 token，允许非 ASCII（如中文 meme 币 币安人生USDT）；
+    // 仅拒绝 trim 后为空/过短、含空白、控制字符或引号（引号会破坏 RPC 表达式 chart_add_symbol(symbol='...')）。
+    isValidSymbolInput(symbol) {
+      const s = String(symbol || '').trim();
+      if (s.length < 2) return false;
+      return !/[\s'"\x00-\x1f]/.test(s);
+    },
+    addSymbol(explicitSymbol, trusted = false) {
       const symbol = (explicitSymbol || this.newSymbol || '').toUpperCase().trim();
       if (!symbol || this.addingSymbol) return;
-      if (!/^[A-Z0-9]{5,20}$/.test(symbol)) {
-        this.showSymbolStatus('symbol 格式无效（如 BTCUSDT）', true);
+      if (!trusted && !this.isValidSymbolInput(symbol)) {
+        this.showSymbolStatus('symbol 格式无效：不能为空且不含空格/引号，如 BTCUSDT', true);
         return;
       }
       const switchTo = () => {

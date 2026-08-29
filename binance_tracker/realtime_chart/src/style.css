@@ -51,5 +51,6 @@ footer { min-height: 27px; display: flex; gap: 20px; align-items: center; paddin
 .tc-symbol { flex: 0 1 auto; min-width: 0; font-weight: 600; letter-spacing: .3px; overflow: hidden; text-overflow: ellipsis; }
 .tc-price { flex: 0 0 auto; margin-left: auto; color: #8fa8a3; white-space: nowrap; }
 .tc-pct { flex: 0 0 56px; text-align: right; font-weight: 600; white-space: nowrap; }
+.ticker-empty { grid-column: 1 / -1; padding: 18px 12px; background: #0d1615; color: #718580; font-size: 11px; line-height: 1.7; }
 .ticker-panel-foot { padding: 5px 10px; border-top: 1px solid #263538; color: #5f7a74; font-size: 10px; }
 @media (max-width: 650px) { .toolbar { padding: 0 12px; gap: 8px; }.brand { font-size: 15px; }.quote { display: none; }.controls { width: auto; flex-wrap: wrap; }.controls label { flex: 1; }.controls select { width: calc(100% - 65px); } .symbol-add { flex: 0 0 auto; } .symbol-add input { width: 96px; } .symbol-status { display: none; } footer { gap: 9px; } .ticker-panel { width: 98vw; top: 40px; } .ticker-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .ticker-panel-hint { display: none; } .symbol-menu-panel { right: 0; width: 170px; } }

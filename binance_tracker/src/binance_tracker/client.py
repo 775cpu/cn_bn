@@ -139,7 +139,10 @@ class BinanceClient:
         url = f"{self.rest_url}/api/v3/exchangeInfo"
         params = None
         if symbols:
-            params = {"symbols": json.dumps(sorted(symbols), separators=(",", ":"))}
+            # ensure_ascii=False: non-ASCII symbols (e.g. CJK meme coins like 币安人生USDT) must be
+            # sent as raw UTF-8 so aiohttp percent-encodes them as %E5%B8%81...; the default
+            # ensure_ascii=True would emit literal "\u5e01" which Binance rejects with HTTP 400.
+            params = {"symbols": json.dumps(sorted(symbols), separators=(",", ":"), ensure_ascii=False)}
         for attempt in range(3):
             try:
                 async with self.session.get(url, params=params, proxy=self.http_proxy, headers=self.rest_headers if self.rest_url.startswith("https://") else None, ssl=self.verify_ssl) as response:

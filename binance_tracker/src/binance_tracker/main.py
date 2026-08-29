@@ -6,7 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from .config import Settings
 from .logging_setup import setup_logging
-from .service import BinanceTracker
+from .service import BinanceTracker, normalize_symbol
 import rpc
 
 def chart_page(response, symbol=None, interval=None):
@@ -71,8 +71,9 @@ def chart_add_symbol(symbol):
     def reply(payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=False)
 
-    symbol = str(symbol or "").upper().strip()
-    if not symbol or not symbol.isalnum():
+    try:
+        symbol = normalize_symbol(symbol)
+    except ValueError:
         return reply({"ok": False, "error": f"无效的 symbol: {symbol!r}"})
     already = symbol in tracker.subscribed_symbols
     payload = {"ok": True, "symbol": symbol, "added": not already, "symbols": sorted(tracker.subscribed_symbols)}
@@ -106,8 +107,9 @@ def chart_remove_symbol(symbol):
     def reply(payload: dict) -> str:
         return json.dumps(payload, ensure_ascii=False)
 
-    symbol = str(symbol or "").upper().strip()
-    if not symbol or not symbol.isalnum():
+    try:
+        symbol = normalize_symbol(symbol)
+    except ValueError:
         return reply({"ok": False, "error": f"无效的 symbol: {symbol!r}"})
     if symbol not in tracker.subscribed_symbols:
         return reply({"ok": True, "symbol": symbol, "removed": False, "symbols": sorted(tracker.subscribed_symbols)})
@@ -164,7 +166,6 @@ async def run(args: argparse.Namespace) -> None:
     except Exception as exc:
         print(f"[启动失败] {type(exc).__name__}: {exc}", flush=True)
         raise
-    logging.getLogger("app").info("tracking symbols=%s", sorted(tracker.subscribed_symbols))
     try:
         await asyncio.Event().wait()
     finally:

@@ -18,6 +18,24 @@ app_log = logging.getLogger("app")
 mismatch_log = logging.getLogger("mismatch")
 error_log = logging.getLogger("error")
 
+
+def normalize_symbol(symbol) -> str:
+    """Normalize and validate one Binance trading symbol.
+
+    Symbols are single tokens used verbatim with Binance REST/WS APIs. They are
+    NOT guaranteed ASCII: spot base assets may contain non-ASCII characters
+    (e.g. CJK meme coins such as 币安人生USDT). Only reject what is meaningless
+    or would break the RPC expression embedding: empty after trim, whitespace,
+    control characters, or quote characters.
+    """
+    normalized = str(symbol or "").upper().strip()
+    if len(normalized) < 2 or any(
+        ch.isspace() or ord(ch) < 0x20 or ch in ("'", '"') for ch in normalized
+    ):
+        raise ValueError(f"invalid symbol: {symbol!r}")
+    return normalized
+
+
 class BinanceTracker:
     def __init__(self, settings: Settings | None = None, display: TerminalDisplay | None = None):
         self.settings = settings or Settings()
@@ -47,12 +65,7 @@ class BinanceTracker:
         return frozenset(self._symbols)
 
     def add_symbols(self, *symbols: str) -> None:
-        normalized_symbols = []
-        for symbol in symbols:
-            normalized = symbol.upper().strip()
-            if not normalized or not normalized.isalnum():
-                raise ValueError(f"invalid symbol: {symbol!r}")
-            normalized_symbols.append(normalized)
+        normalized_symbols = [normalize_symbol(symbol) for symbol in symbols]
         with self._symbols_lock:
             for normalized in normalized_symbols:
                 self._symbols.add(normalized)
@@ -172,17 +185,12 @@ class BinanceTracker:
 
     async def _load_price_precisions(self, retries: int = 3) -> bool:
         """Load symbol-specific display precision; return whether any value was loaded."""
-        assert self._client is not None and self._client.session is not None
-        params = {"symbols": json.dumps(sorted(self.subscribed_symbols), separators=(",", ":"))}
+        assert self._client is not None
         for attempt in range(1, retries + 1):
             try:
-                async with self._client.session.get(
-                    f"{self._client.rest_url}/api/v3/exchangeInfo",
-                    params=params, headers=self._client.rest_headers,
-                    ssl=False if self._client.rest_headers else self.settings.verify_ssl,
-                ) as response:
-                    response.raise_for_status()
-                    payload = await response.json()
+                # Go through the shared client entry point: it handles non-ASCII symbol encoding
+                # (ensure_ascii=False), proxy/SSL/direct-IP options, and retries network errors.
+                payload = await self._client.exchange_info(symbols=sorted(self.subscribed_symbols))
                 loaded = 0
                 for item in payload.get("symbols", []):
                     rule = next((rule for rule in item.get("filters", []) if rule.get("filterType") == "PRICE_FILTER"), None)
@@ -192,7 +200,11 @@ class BinanceTracker:
                         loaded += 1
                 app_log.info("price precisions loaded symbols=%d attempt=%d", loaded, attempt)
                 return loaded > 0
-            except Exception:
+            except Exception as exc:
+                # 4xx (e.g. HTTP 400 / -1121 invalid symbol) is a permanent client-side error; retrying is pointless.
+                if isinstance(exc, aiohttp.ClientResponseError) and 400 <= exc.status < 500:
+                    app_log.error("price precision load rejected by Binance status=%s; using defaults", exc.status)
+                    return False
                 if attempt == retries:
                     app_log.exception("failed to load symbol price precisions after %d attempts; using defaults", retries)
                 else:
