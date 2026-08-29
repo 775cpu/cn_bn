@@ -1,8 +1,10 @@
 import asyncio
 import json
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 import logging
 import math
+import os
 import time
 import threading
 import aiohttp
@@ -30,6 +32,14 @@ class BinanceTracker:
         self._chart_clients: set = set()
         self._chart_clients_lock = threading.RLock()
         self._price_precisions: dict[str, int] = {}
+        self._ticker24h: list[dict] = []
+        self._ticker24h_time_ms: int = 0
+        # Compact in-memory index of exchangeInfo: symbol -> {"status", "baseAsset", "quoteAsset"}.
+        # The full ~16MB exchangeInfo snapshot is only kept on disk.
+        self._exchange_info_index: dict[str, dict] = {}
+        self._exchange_info_time_ms: int = 0
+        self._exchange_info_path = Path(self.settings.log_dir) / "exchange_info.json"
+        self._exchange_info_extra_path = Path(self.settings.log_dir) / "exchange_info_extra.json"
         self.display = display or TerminalDisplay(self.settings.display_mode, self.settings.display_only_breakouts, self.settings.display_price_decimals, self.settings.display_boll_decimals, self.settings.display_refresh_seconds)
 
     @property
@@ -50,8 +60,11 @@ class BinanceTracker:
         self._notify_changed()
 
     def remove_symbols(self, *symbols: str) -> None:
+        normalized = {symbol.upper().strip() for symbol in symbols}
         with self._symbols_lock:
-            self._symbols.difference_update(symbol.upper().strip() for symbol in symbols)
+            self._symbols.difference_update(normalized)
+            for symbol in normalized:
+                self.books.pop(symbol, None)
         self._notify_changed()
 
     def _notify_changed(self) -> None:
@@ -93,7 +106,8 @@ class BinanceTracker:
         with self._chart_clients_lock:
             self._chart_clients.add(connection)
         try:
-            self._chart_send(connection, self._chart_snapshot(symbol, interval))
+            if symbol:
+                self._chart_send(connection, self._chart_snapshot(symbol, interval))
             while True:
                 raw = connection.receive()
                 if raw is None:
@@ -145,6 +159,8 @@ class BinanceTracker:
             else:
                 print("[网络] 使用域名直连", flush=True)
             await self._load_price_precisions()
+            await self._load_exchange_info()
+            await self._refresh_ticker24h()
             self._tasks = [asyncio.create_task(self._stream_loop()), asyncio.create_task(self._clock_loop()), asyncio.create_task(self._ip_selection_loop())]
             await asyncio.gather(*(self._check_mismatch_symbol(symbol) for symbol in tuple(self._symbols)))
             self._tasks.append(asyncio.create_task(self._mismatch_loop()))
@@ -186,6 +202,137 @@ class BinanceTracker:
 
     async def reload_price_precisions(self) -> bool:
         return await self._load_price_precisions()
+
+    @staticmethod
+    def _build_exchange_index(payload: dict) -> dict[str, dict]:
+        """Extract a compact symbol -> {status, baseAsset, quoteAsset} index from an exchangeInfo payload."""
+        index: dict[str, dict] = {}
+        for item in payload.get("symbols", []):
+            symbol = item.get("symbol")
+            if not symbol:
+                continue
+            index[symbol] = {
+                "status": item.get("status", ""),
+                "baseAsset": item.get("baseAsset", ""),
+                "quoteAsset": item.get("quoteAsset", ""),
+            }
+        return index
+
+    def _write_json_atomic(self, path: Path, payload) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        os.replace(tmp_path, path)
+
+    def _load_exchange_info_from_disk(self) -> bool:
+        """Rebuild the compact index from the on-disk full snapshot (+ sidecar of later-added symbols)."""
+        try:
+            if self._exchange_info_path.exists():
+                payload = json.loads(self._exchange_info_path.read_text(encoding="utf-8"))
+                self._exchange_info_index = self._build_exchange_index(payload)
+                self._exchange_info_time_ms = int(self._exchange_info_path.stat().st_mtime * 1000)
+            if self._exchange_info_extra_path.exists():
+                extra = json.loads(self._exchange_info_extra_path.read_text(encoding="utf-8"))
+                self._exchange_info_index.update(extra.get("symbols", {}))
+            if self._exchange_info_index:
+                app_log.info("exchangeInfo index restored from disk symbols=%d", len(self._exchange_info_index))
+                return True
+        except Exception:
+            error_log.exception("failed to load exchangeInfo snapshot from disk")
+        return False
+
+    async def _load_exchange_info(self) -> bool:
+        """Load the full exchangeInfo snapshot once: write the raw ~16MB payload to disk,
+        keep only the compact symbol index in memory."""
+        assert self._client is not None
+        try:
+            payload = await self._client.exchange_info()
+            index = self._build_exchange_index(payload)
+            if not index:
+                raise RuntimeError("exchangeInfo payload contained no symbols")
+            self._write_json_atomic(self._exchange_info_path, payload)
+            self._exchange_info_index = index
+            self._exchange_info_time_ms = int(time.time() * 1000)
+            app_log.info("exchangeInfo full snapshot cached on disk symbols=%d path=%s", len(index), self._exchange_info_path)
+            return True
+        except Exception:
+            error_log.exception("full exchangeInfo load failed; trying on-disk snapshot")
+            return self._load_exchange_info_from_disk()
+
+    async def _ensure_symbols_in_index(self, symbols) -> None:
+        """Look up symbols missing from the exchangeInfo index via per-symbol exchangeInfo requests
+        (newly listed pairs seen in the 24hr ticker), then persist them to the small sidecar file."""
+        assert self._client is not None
+        missing = sorted(symbol for symbol in symbols if symbol and symbol not in self._exchange_info_index)
+        if not missing:
+            return
+        fetched: dict[str, dict] = {}
+        for symbol in missing:
+            try:
+                payload = await self._client.exchange_info([symbol])
+                fetched.update(self._build_exchange_index(payload))
+            except Exception:
+                error_log.warning("exchangeInfo lookup failed for new symbol=%s", symbol, exc_info=True)
+        if not fetched:
+            return
+        self._exchange_info_index.update(fetched)
+        try:
+            extra = {"time": int(time.time() * 1000), "symbols": {}}
+            if self._exchange_info_extra_path.exists():
+                extra = json.loads(self._exchange_info_extra_path.read_text(encoding="utf-8"))
+            extra.setdefault("symbols", {}).update(fetched)
+            self._write_json_atomic(self._exchange_info_extra_path, extra)
+        except Exception:
+            error_log.exception("failed to persist exchange_info sidecar")
+        app_log.info("exchangeInfo index extended new_symbols=%d", len(fetched))
+
+    async def _refresh_ticker24h(self) -> bool:
+        """Fetch /api/v3/ticker/24hr (all spot symbols) and cache a compact list for the symbol picker.
+
+        Cached fields are bound 1:1 to the real API response:
+        symbol / lastPrice / priceChangePercent, plus quoteAsset from the exchangeInfo index.
+        Only TRADING pairs are kept (the ticker still returns BREAK/delisted pairs such as NFPTRY).
+        """
+        assert self._client is not None
+        try:
+            payload = await self._client.ticker_24hr()
+        except Exception:
+            error_log.exception("24hr ticker refresh failed; keeping previous cache of %d symbols", len(self._ticker24h))
+            return False
+        # Refresh the full exchangeInfo snapshot once a day so BREAK/status flips are picked up.
+        if self._exchange_info_index and time.time() * 1000 - self._exchange_info_time_ms > 86_400_000:
+            await self._load_exchange_info()
+        await self._ensure_symbols_in_index({item.get("symbol") for item in payload})
+        cached: list[dict] = []
+        skipped_inactive = 0
+        for item in payload:
+            symbol = item.get("symbol")
+            if not symbol:
+                continue
+            info = self._exchange_info_index.get(symbol)
+            if info is not None and info.get("status") != "TRADING":
+                skipped_inactive += 1
+                continue
+            try:
+                last_price = float(item.get("lastPrice") or 0.0)
+                change_percent = float(item.get("priceChangePercent") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if last_price <= 0:
+                continue
+            cached.append({"symbol": symbol, "lastPrice": last_price, "priceChangePercent": change_percent,
+                           "quoteAsset": (info or {}).get("quoteAsset", "")})
+        if not cached:
+            app_log.warning("24hr ticker refresh returned no usable symbols; keeping previous cache")
+            return False
+        self._ticker24h = cached
+        self._ticker24h_time_ms = int(time.time() * 1000)
+        app_log.info("24hr ticker cached symbols=%d skipped_inactive=%d", len(cached), skipped_inactive)
+        return True
+
+    def get_ticker24h(self) -> dict:
+        """Return the cached 24hr ticker list (safe to call from the RPC thread)."""
+        return {"time": self._ticker24h_time_ms, "tickers": self._ticker24h}
 
     async def stop(self) -> None:
         self._stop.set()
@@ -271,6 +418,7 @@ class BinanceTracker:
                 self.settings.mismatch_check_seconds,
             )
             await asyncio.gather(*(self._check_mismatch_symbol(symbol) for symbol in tuple(self._symbols)))
+            await self._refresh_ticker24h()
             app_log.info("periodic calibration completed elapsed_seconds=%.1f", time.monotonic() - started)
             try:
                 await asyncio.wait_for(self._stop.wait(), self.settings.mismatch_check_seconds)

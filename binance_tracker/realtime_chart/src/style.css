@@ -16,4 +16,35 @@ footer { min-height: 27px; display: flex; gap: 20px; align-items: center; paddin
 .symbol-add .add-button:disabled { opacity: .45; cursor: default; border-color: #39504e; color: #a8cbc2; }
 .symbol-status { color: #35c99a; font-size: 10px; white-space: nowrap; }
 .symbol-status.error { color: #ef6b73; }
-@media (max-width: 650px) { .toolbar { padding: 0 12px; gap: 8px; }.brand { font-size: 15px; }.quote { display: none; }.controls { width: auto; flex-wrap: wrap; }.controls label { flex: 1; }.controls select { width: calc(100% - 65px); } .symbol-add { flex: 0 0 auto; } .symbol-add input { width: 96px; } .symbol-status { display: none; } footer { gap: 9px; } }
+/* ---- subscribed-symbol picker (replaces native select; × to unsubscribe) ---- */
+.symbol-picker { display: flex; align-items: center; gap: 6px; }
+.symbol-menu { position: relative; }
+.symbol-menu-button { width: auto; min-width: 106px; height: 30px; padding: 0 8px 0 10px; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.symbol-menu-current { letter-spacing: .5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.symbol-menu-button .caret { color: #718580; font-size: 9px; }
+.symbol-menu-panel { position: absolute; top: 36px; right: 0; z-index: 60; width: 196px; max-height: 58vh; overflow-y: auto; padding: 2px; border: 1px solid #39504e; border-radius: 3px; background: #0e1716; box-shadow: 0 10px 28px rgba(0,0,0,.55); }
+.symbol-menu-row { display: flex; align-items: center; height: 26px; border-radius: 2px; cursor: pointer; }
+.symbol-menu-row:hover, .symbol-menu-row.active { background: #16302b; }
+.symbol-menu-row.active .symbol-menu-name { color: #35c99a; }
+.symbol-menu-name { flex: 1; padding: 0 8px; font-size: 12px; letter-spacing: .5px; color: #cfe0db; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.symbol-remove { width: 24px; height: 24px; margin: 0 2px 0 0; padding: 0; border: none; border-radius: 2px; background: transparent; font-size: 15px; line-height: 1; color: #718580; }
+.symbol-remove:hover { border-color: transparent; color: #ef6b73; background: rgba(239,107,115,.14); }
+.symbol-menu-empty { padding: 8px 10px; font-size: 11px; color: #718580; }
+/* ---- all-symbol 24hr ticker panel: compact multi-column grid ---- */
+.pop-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(2,8,7,.45); }
+.ticker-panel { position: fixed; z-index: 41; top: 44px; left: 50%; transform: translateX(-50%); width: min(1280px, 97vw); max-height: calc(100vh - 64px); display: flex; flex-direction: column; border: 1px solid #39504e; border-radius: 4px; background: rgba(11,20,19,.98); box-shadow: 0 14px 44px rgba(0,0,0,.6); overflow: hidden; }
+.ticker-panel-head { display: flex; align-items: center; gap: 14px; padding: 6px 10px; border-bottom: 1px solid #263538; color: #8da4a1; font-size: 11px; white-space: nowrap; }
+.ticker-panel-hint { color: #5f7a74; overflow: hidden; text-overflow: ellipsis; }
+.ticker-panel-close { margin-left: auto; width: 24px; height: 24px; padding: 0; font-size: 15px; line-height: 1; flex: 0 0 auto; }
+.ticker-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: 1px; padding: 1px; background: #1d302e; }
+.ticker-group-head { grid-column: 1 / -1; position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 8px; background: #142622; border-top: 1px solid #2c423d; color: #8fd8c4; font: 600 11px 'IBM Plex Mono', monospace; letter-spacing: 1.5px; }
+.ticker-group-head .tgh-count { color: #5f7a74; font-weight: 400; letter-spacing: 0; }
+.ticker-cell { width: auto; height: 24px; margin: 0; padding: 0 8px; border: none; border-radius: 0; background: #0d1615; display: flex; align-items: center; gap: 6px; font: 500 11px 'IBM Plex Mono', monospace; color: #cfe0db; text-align: left; white-space: nowrap; cursor: pointer; }
+.ticker-cell:hover { border-color: transparent; background: #16302b; color: #e9f0ee; }
+.ticker-cell.subscribed { background: #10231d; }
+.ticker-cell.subscribed .tc-symbol { color: #35c99a; }
+.tc-symbol { font-weight: 600; letter-spacing: .3px; overflow: hidden; text-overflow: ellipsis; }
+.tc-price { margin-left: auto; color: #8fa8a3; overflow: hidden; text-overflow: ellipsis; }
+.tc-pct { flex: 0 0 64px; text-align: right; font-weight: 600; }
+.ticker-panel-foot { padding: 5px 10px; border-top: 1px solid #263538; color: #5f7a74; font-size: 10px; }
+@media (max-width: 650px) { .toolbar { padding: 0 12px; gap: 8px; }.brand { font-size: 15px; }.quote { display: none; }.controls { width: auto; flex-wrap: wrap; }.controls label { flex: 1; }.controls select { width: calc(100% - 65px); } .symbol-add { flex: 0 0 auto; } .symbol-add input { width: 96px; } .symbol-status { display: none; } footer { gap: 9px; } .ticker-panel { width: 98vw; top: 40px; } .ticker-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .ticker-panel-hint { display: none; } .symbol-menu-panel { right: 0; width: 170px; } }

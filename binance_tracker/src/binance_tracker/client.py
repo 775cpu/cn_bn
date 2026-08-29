@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 from typing import Any
@@ -123,6 +124,55 @@ class BinanceClient:
                     raise
                 # Client-side errors (e.g. -1121 invalid symbol) are permanent; fail fast instead of retrying.
                 if isinstance(exc, aiohttp.ClientResponseError) and exc.status in (400, 401, 403, 404):
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        return []
+
+    async def exchange_info(self, symbols: list[str] | tuple[str, ...] | None = None) -> dict:
+        """Fetch /api/v3/exchangeInfo.
+
+        symbols=None -> full snapshot (~16MB, all pairs, includes BREAK/delisted ones).
+        symbols=[...] -> only the given symbols (used to look up newly seen pairs).
+        Real item fields: {"symbol": "NFPTRY", "status": "BREAK", "baseAsset": "NFP", "quoteAsset": "TRY", ...}
+        """
+        assert self.session is not None
+        url = f"{self.rest_url}/api/v3/exchangeInfo"
+        params = None
+        if symbols:
+            params = {"symbols": json.dumps(sorted(symbols), separators=(",", ":"))}
+        for attempt in range(3):
+            try:
+                async with self.session.get(url, params=params, proxy=self.http_proxy, headers=self.rest_headers if self.rest_url.startswith("https://") else None, ssl=self.verify_ssl) as response:
+                    response.raise_for_status()
+                    payload: Any = await response.json()
+                return payload
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                network_log.warning("REST exchangeInfo symbols=%s attempt=%d: %s", len(symbols) if symbols else "ALL", attempt + 1, exc)
+                if attempt == 2:
+                    raise
+                # Client-side errors (e.g. -1121 invalid symbol) are permanent; fail fast instead of retrying.
+                if isinstance(exc, aiohttp.ClientResponseError) and exc.status in (400, 401, 403, 404):
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        return {}
+
+    async def ticker_24hr(self) -> list[dict]:
+        """Fetch the spot 24hr ticker list for every symbol.
+
+        Real response item (api.binance.com/api/v3/ticker/24hr):
+        {"symbol": "ETHBTC", "lastPrice": "0.03136000", "priceChangePercent": "-0.539", ...}
+        """
+        assert self.session is not None
+        url = f"{self.rest_url}/api/v3/ticker/24hr"
+        for attempt in range(3):
+            try:
+                async with self.session.get(url, proxy=self.http_proxy, headers=self.rest_headers if self.rest_url.startswith("https://") else None, ssl=self.verify_ssl) as response:
+                    response.raise_for_status()
+                    payload: Any = await response.json()
+                return payload if isinstance(payload, list) else []
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                network_log.warning("REST ticker/24hr attempt=%d: %s", attempt + 1, exc)
+                if attempt == 2:
                     raise
                 await asyncio.sleep(2 ** attempt)
         return []

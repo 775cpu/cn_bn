@@ -16,7 +16,8 @@ def chart_page(response, symbol=None, interval=None):
     if interval not in tracker.settings.intervals:
         interval = tracker.settings.intervals[0]
     page = (Path(__file__).resolve().parents[2] / "realtime_chart" / "dist" / "index.html").read_text(encoding="utf-8")
-    page = page.replace("</head>", f"<script>window.__SYMBOLS__={json.dumps(sorted(tracker.subscribed_symbols))};window.__INTERVALS__={json.dumps(list(tracker.settings.intervals))};window.__INITIAL_SYMBOL__={json.dumps(symbol)};window.__INITIAL_INTERVAL__={json.dumps(interval)};</script></head>")
+    ticker_data = tracker.get_ticker24h()
+    page = page.replace("</head>", f"<script>window.__SYMBOLS__={json.dumps(sorted(tracker.subscribed_symbols))};window.__INTERVALS__={json.dumps(list(tracker.settings.intervals))};window.__INITIAL_SYMBOL__={json.dumps(symbol)};window.__INITIAL_INTERVAL__={json.dumps(interval)};window.__TICKERS__={json.dumps(ticker_data['tickers'], ensure_ascii=False)};window.__TICKER_TIME__={ticker_data['time']};</script></head>")
     response.set_header("Content-Type", "text/html; charset=utf-8")
     response.set_data(page)
 
@@ -90,6 +91,28 @@ def chart_add_symbol(symbol):
         payload["symbols"] = sorted(tracker.subscribed_symbols)
         logging.getLogger("app").info("chart add symbol ok symbol=%s total=%d", symbol, len(payload["symbols"]))
     return reply(payload)
+
+def chart_ticker24h():
+    """Pure-text RPC API: return the cached 24hr ticker list (all spot symbols),
+    refreshed together with the periodic calibration. Call as r=chart_ticker24h();
+    returns a JSON string: {"ok": true, "time": <ms>, "tickers": [{"symbol", "lastPrice", "priceChangePercent"}, ...]}"""
+    data = tracker.get_ticker24h()
+    return json.dumps({"ok": True, "time": data["time"], "tickers": data["tickers"]}, ensure_ascii=False)
+
+def chart_remove_symbol(symbol):
+    """Pure-text RPC API: unsubscribe a symbol at runtime (drop the WS stream and its book).
+    Call as r=chart_remove_symbol(symbol='ETHUSDT'); returns a JSON string."""
+    def reply(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    symbol = str(symbol or "").upper().strip()
+    if not symbol or not symbol.isalnum():
+        return reply({"ok": False, "error": f"无效的 symbol: {symbol!r}"})
+    if symbol not in tracker.subscribed_symbols:
+        return reply({"ok": True, "symbol": symbol, "removed": False, "symbols": sorted(tracker.subscribed_symbols)})
+    tracker.remove_symbols(symbol)
+    logging.getLogger("app").info("chart remove symbol symbol=%s remaining=%d", symbol, len(tracker.subscribed_symbols))
+    return reply({"ok": True, "symbol": symbol, "removed": True, "symbols": sorted(tracker.subscribed_symbols)})
 
 def reload_price_precisions():
     if not tracker._loop or not tracker._client:

@@ -1,20 +1,53 @@
 <template>
   <main class="terminal">
     <header class="toolbar">
-      <div class="brand"><span class="signal"></span><span>BINANCE / LIVE KLINES</span></div>
+      <div class="brand"></div>
       <div class="quote"><strong>{{ symbol }}</strong><span>{{ lastPrice }}</span><span :class="changeClass">{{ changeText }}</span></div>
       <div class="controls">
         <label class="symbol-add">
           <input v-model.trim="newSymbol" placeholder="订阅 SYMBOL" :disabled="addingSymbol" spellcheck="false" autocomplete="off"
-                 @keydown.enter="addSymbol" @input="symbolStatus = ''">
-          <button class="add-button" type="button" :disabled="addingSymbol || !newSymbol" title="订阅新 symbol：自动订阅 WS 并校准 K 线" @click="addSymbol">{{ addingSymbol ? '…' : '＋' }}</button>
+                 @keydown.enter="addSymbol()" @keydown.esc="closePanels" @input="symbolStatus = ''" @focus="openTickerPanel">
+          <button class="add-button" type="button" :disabled="addingSymbol || !newSymbol" title="订阅新 symbol：自动订阅 WS 并校准 K 线" @click="addSymbol()">{{ addingSymbol ? '…' : '＋' }}</button>
           <span v-if="symbolStatus" class="symbol-status" :class="{ error: symbolStatusError }">{{ symbolStatus }}</span>
         </label>
-        <label>SYMBOL <select v-model="symbol" @change="subscribe"><option v-for="item in symbols" :key="item" :value="item">{{ item }}</option></select></label>
+        <label class="symbol-picker">SYMBOL
+          <div class="symbol-menu">
+            <button type="button" class="symbol-menu-button" :title="'已订阅 ' + symbols.length + ' 个：点击切换，× 取消订阅'" @click.stop="toggleSymbolMenu">
+              <span class="symbol-menu-current">{{ symbol || '—' }}</span><span class="caret">▾</span>
+            </button>
+            <div v-if="showSymbolMenu" class="symbol-menu-panel">
+              <div v-for="item in symbols" :key="item" class="symbol-menu-row" :class="{ active: item === symbol }">
+                <span class="symbol-menu-name" @click="switchSymbol(item)">{{ item }}</span>
+                <button type="button" class="symbol-remove" :title="'取消订阅 ' + item" @click.stop="removeSymbol(item)">×</button>
+              </div>
+              <div v-if="!symbols.length" class="symbol-menu-empty">暂无订阅，在左侧输入框添加</div>
+            </div>
+          </div>
+        </label>
         <label>INTERVAL <select v-model="interval" @change="subscribe"><option v-for="item in intervals" :key="item" :value="item">{{ item }}</option></select></label>
         <button class="icon-button" title="切换全屏" @click="toggleFullscreen">⛶</button>
       </div>
     </header>
+    <div v-if="showTickerPanel || showSymbolMenu" class="pop-overlay" @click="closePanels"></div>
+    <section v-if="showTickerPanel" class="ticker-panel">
+      <header class="ticker-panel-head">
+        <span>全部交易对 · 按计价币分组（USDT 优先），组内按 24h 涨跌幅绝对值排序 · 共 {{ tickers.length }} 个<template v-if="newSymbol"> · 筛选出 {{ filteredTickers.length }} 个</template></span>
+        <span class="ticker-panel-hint">点击行订阅 / 切换；已订阅为绿色{{ loadingTickers ? ' · 行情加载中…' : tickerAgeText ? ' · ' + tickerAgeText : '' }}</span>
+        <button type="button" class="ticker-panel-close" title="关闭" @click="closePanels">×</button>
+      </header>
+      <div class="ticker-grid">
+        <template v-for="group in groupedTickers" :key="group.quote">
+          <div class="ticker-group-head">{{ group.quote }}<span class="tgh-count">{{ group.items.length }}</span></div>
+          <button v-for="item in group.shown" :key="item.symbol" type="button" class="ticker-cell"
+                  :class="{ subscribed: symbols.includes(item.symbol) }" :title="item.symbol" @click="pickTicker(item)">
+            <span class="tc-symbol">{{ item.symbol }}</span>
+            <span class="tc-price">{{ formatTickerPrice(item.lastPrice) }}</span>
+            <span class="tc-pct" :class="item.priceChangePercent >= 0 ? 'up' : 'down'">{{ formatPct(item.priceChangePercent) }}</span>
+          </button>
+        </template>
+      </div>
+      <footer v-if="tickerHiddenTotal > 0" class="ticker-panel-foot">部分组别仅显示涨跌幅最活跃的前 {{ tickerGroupCap }} 个（{{ tickerHiddenTotal }} 个已折叠），在输入框键入 symbol 可精确筛选</footer>
+    </section>
     <div class="status"><i :class="{ online: connected }"></i>{{ connected ? 'LIVE' : 'CONNECTING' }}</div>
     <div class="chart-wrap"><div ref="chart" class="chart"></div><div class="scale-controls"><button title="Auto: 让 K 线和指标尽量铺满屏幕" :class="{ active: autoScale }" @click="toggleAutoScale">A</button><button title="锁定价格尺度" :class="{ active: scaleLocked }" @click="toggleScaleLock">L</button></div></div>
     <footer><span>实时行情</span><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint">WebSocket stream</span></footer>
@@ -34,9 +67,55 @@ export default {
       symbols: window.__SYMBOLS__ || ['BTCUSDT'],
       intervals: window.__INTERVALS__ || ['1m'],
       newSymbol: '', addingSymbol: false, symbolStatus: '', symbolStatusError: false, symbolStatusTimer: null,
+      tickers: Array.isArray(window.__TICKERS__) ? window.__TICKERS__ : [],
+      tickerTime: Number(window.__TICKER_TIME__) || 0,
+      loadingTickers: false, showTickerPanel: false, showSymbolMenu: false,
     };
   },
   computed: {
+    filteredTickers() {
+      const keyword = (this.newSymbol || '').trim().toUpperCase();
+      if (!keyword) return this.tickers;
+      return this.tickers.filter((item) => item.symbol.includes(keyword));
+    },
+    tickerGroupCap() {
+      return (this.newSymbol || '').trim() ? 1000 : 240;
+    },
+    groupedTickers() {
+      const keyword = (this.newSymbol || '').trim().toUpperCase();
+      const source = keyword ? this.tickers.filter((item) => item.symbol.includes(keyword)) : this.tickers;
+      const map = new Map();
+      for (const item of source) {
+        const quote = item.quoteAsset || 'OTHER';
+        if (!map.has(quote)) map.set(quote, []);
+        map.get(quote).push(item);
+      }
+      const groups = Array.from(map, ([quote, items]) => ({ quote, items }));
+      // USDT first (most active / most pairs), then by pair count desc, then name.
+      groups.sort((a, b) => {
+        if (a.quote === 'USDT') return -1;
+        if (b.quote === 'USDT') return 1;
+        if (b.items.length !== a.items.length) return b.items.length - a.items.length;
+        return a.quote < b.quote ? -1 : a.quote > b.quote ? 1 : 0;
+      });
+      const cap = this.tickerGroupCap;
+      for (const group of groups) {
+        group.items.sort((a, b) => Math.abs(b.priceChangePercent) - Math.abs(a.priceChangePercent));
+        group.shown = group.items.slice(0, cap);
+        group.hidden = group.items.length - group.shown.length;
+      }
+      return groups;
+    },
+    tickerHiddenTotal() {
+      return this.groupedTickers.reduce((sum, group) => sum + group.hidden, 0);
+    },
+    tickerAgeText() {
+      if (!this.tickerTime) return '';
+      const seconds = Math.max(0, Math.floor((Date.now() - this.tickerTime) / 1000));
+      if (seconds < 60) return `${seconds}s 前更新`;
+      const minutes = Math.floor(seconds / 60);
+      return `${minutes}m${seconds % 60}s 前更新`;
+    },
     barCount() { return this.bars.length; },
     lastBar() { return this.bars[this.bars.length - 1] || {}; },
     lastPrice() { return this.lastBar.close == null ? '--' : Number(this.lastBar.close).toLocaleString(undefined, { maximumFractionDigits: 8 }); },
@@ -167,8 +246,81 @@ export default {
       clearTimeout(this.symbolStatusTimer);
       if (isError && message) this.symbolStatusTimer = setTimeout(() => { this.symbolStatus = ''; }, 6000);
     },
-    addSymbol() {
-      const symbol = (this.newSymbol || '').toUpperCase().trim();
+    openTickerPanel() {
+      this.showSymbolMenu = false;
+      this.showTickerPanel = true;
+      const ageMs = Date.now() - (this.tickerTime || 0);
+      if (!this.tickers.length || ageMs > 60000) this.fetchTickers();
+    },
+    closePanels() {
+      this.showTickerPanel = false;
+      this.showSymbolMenu = false;
+    },
+    toggleSymbolMenu() {
+      this.showTickerPanel = false;
+      this.showSymbolMenu = !this.showSymbolMenu;
+    },
+    fetchTickers() {
+      if (this.loadingTickers) return;
+      this.loadingTickers = true;
+      const expression = 'r=chart_ticker24h()';
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('tickers-rpc-request', { url });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error || !data.ok || !Array.isArray(data.tickers)) throw new Error(data.error || `HTTP ${response.status}`);
+        this.tickers = data.tickers;
+        this.tickerTime = Number(data.time) || Date.now();
+        this.log('tickers-loaded', { count: this.tickers.length });
+      }).catch((error) => {
+        console.error('[realtime-chart] tickers-rpc-error', error);
+        this.showSymbolStatus('交易对行情加载失败', true);
+      }).finally(() => {
+        this.loadingTickers = false;
+      });
+    },
+    formatTickerPrice(value) {
+      if (!Number.isFinite(value)) return '--';
+      return Number(value).toLocaleString(undefined, { maximumFractionDigits: 8 });
+    },
+    formatPct(value) {
+      if (!Number.isFinite(value)) return '--';
+      return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    },
+    pickTicker(item) {
+      if (this.symbols.includes(item.symbol)) {
+        this.switchSymbol(item.symbol);
+        return;
+      }
+      this.newSymbol = item.symbol;
+      this.addSymbol(item.symbol);
+    },
+    switchSymbol(symbol) {
+      this.closePanels();
+      if (!symbol || this.symbol === symbol) return;
+      this.symbol = symbol;
+      this.subscribe();
+    },
+    removeSymbol(symbol) {
+      const expression = `r=chart_remove_symbol(symbol='${symbol}')`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('remove-symbol-request', { url });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        if (Array.isArray(data.symbols)) this.symbols = data.symbols.slice();
+        else this.symbols = this.symbols.filter((item) => item !== symbol);
+        this.log('remove-symbol-ok', { symbol, symbols: this.symbols });
+        if (this.symbol === symbol) {
+          const next = this.symbols[0] || '';
+          if (next) this.switchSymbol(next);
+          else this.closePanels();
+        }
+      }).catch((error) => {
+        console.error('[realtime-chart] remove-symbol-error', error);
+        this.showSymbolStatus(error.message || String(error), true);
+      });
+    },
+    addSymbol(explicitSymbol) {
+      const symbol = (explicitSymbol || this.newSymbol || '').toUpperCase().trim();
       if (!symbol || this.addingSymbol) return;
       if (!/^[A-Z0-9]{5,20}$/.test(symbol)) {
         this.showSymbolStatus('symbol 格式无效（如 BTCUSDT）', true);
@@ -178,6 +330,7 @@ export default {
         this.addingSymbol = false;
         this.newSymbol = '';
         this.symbolStatus = '';
+        this.closePanels();
         if (this.symbol !== symbol) {
           this.symbol = symbol;
           this.subscribe();
