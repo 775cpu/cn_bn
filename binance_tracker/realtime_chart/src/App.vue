@@ -4,6 +4,12 @@
       <div class="brand"><span class="signal"></span><span>BINANCE / LIVE KLINES</span></div>
       <div class="quote"><strong>{{ symbol }}</strong><span>{{ lastPrice }}</span><span :class="changeClass">{{ changeText }}</span></div>
       <div class="controls">
+        <label class="symbol-add">
+          <input v-model.trim="newSymbol" placeholder="订阅 SYMBOL" :disabled="addingSymbol" spellcheck="false" autocomplete="off"
+                 @keydown.enter="addSymbol" @input="symbolStatus = ''">
+          <button class="add-button" type="button" :disabled="addingSymbol || !newSymbol" title="订阅新 symbol：自动订阅 WS 并校准 K 线" @click="addSymbol">{{ addingSymbol ? '…' : '＋' }}</button>
+          <span v-if="symbolStatus" class="symbol-status" :class="{ error: symbolStatusError }">{{ symbolStatus }}</span>
+        </label>
         <label>SYMBOL <select v-model="symbol" @change="subscribe"><option v-for="item in symbols" :key="item" :value="item">{{ item }}</option></select></label>
         <label>INTERVAL <select v-model="interval" @change="subscribe"><option v-for="item in intervals" :key="item" :value="item">{{ item }}</option></select></label>
         <button class="icon-button" title="切换全屏" @click="toggleFullscreen">⛶</button>
@@ -27,6 +33,7 @@ export default {
       autoScale: true, scaleLocked: false, pricePrecision: 8, latency: '--', serverTime: '--', pendingHistory: null, historyRetryTimer: null, historyRetryCount: 0, requestedHistory: new Set(), historyExhausted: false, chartGeneration: 0,
       symbols: window.__SYMBOLS__ || ['BTCUSDT'],
       intervals: window.__INTERVALS__ || ['1m'],
+      newSymbol: '', addingSymbol: false, symbolStatus: '', symbolStatusError: false, symbolStatusTimer: null,
     };
   },
   computed: {
@@ -63,7 +70,7 @@ export default {
     this.updateAxisMode();
     this.connect();
   },
-  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
+  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearTimeout(this.symbolStatusTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
   methods: {
     log(event, details) {
       if (event === 'history-rpc-error' || event === 'history-rejected-gap' || event === 'ws-error' || event === 'server-error') {
@@ -153,6 +160,46 @@ export default {
           });
         }, true);
       }
+    },
+    showSymbolStatus(message, isError) {
+      this.symbolStatus = message;
+      this.symbolStatusError = !!isError;
+      clearTimeout(this.symbolStatusTimer);
+      if (isError && message) this.symbolStatusTimer = setTimeout(() => { this.symbolStatus = ''; }, 6000);
+    },
+    addSymbol() {
+      const symbol = (this.newSymbol || '').toUpperCase().trim();
+      if (!symbol || this.addingSymbol) return;
+      if (!/^[A-Z0-9]{5,20}$/.test(symbol)) {
+        this.showSymbolStatus('symbol 格式无效（如 BTCUSDT）', true);
+        return;
+      }
+      const switchTo = () => {
+        this.addingSymbol = false;
+        this.newSymbol = '';
+        this.symbolStatus = '';
+        if (this.symbol !== symbol) {
+          this.symbol = symbol;
+          this.subscribe();
+        }
+      };
+      if (this.symbols.includes(symbol)) { switchTo(); return; }
+      this.addingSymbol = true;
+      this.showSymbolStatus('订阅与 K 线校准中…', false);
+      const expression = `r=chart_add_symbol(symbol='${symbol}')`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('add-symbol-request', { url });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        if (Array.isArray(data.symbols) && data.symbols.length) this.symbols = data.symbols.slice();
+        else if (!this.symbols.includes(symbol)) this.symbols = this.symbols.concat(symbol).sort();
+        this.log('add-symbol-ok', { symbol, symbols: this.symbols });
+        switchTo();
+      }).catch((error) => {
+        console.error('[realtime-chart] add-symbol-error', error);
+        this.addingSymbol = false;
+        this.showSymbolStatus(error.message || String(error), true);
+      });
     },
     subscribe() {
       const url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}')`;

@@ -62,6 +62,35 @@ def chart_history(response, symbol, interval, end_time, limit=100):
     response.set_header("Content-Type", "application/json; charset=utf-8")
     response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
 
+def chart_add_symbol(symbol):
+    """Pure-text RPC API: subscribe a new symbol at runtime (auto-subscribe WS stream,
+    REST-calibrate klines, load price precision). Call as r=chart_add_symbol(symbol='ETHUSDT');
+    returns a JSON string."""
+    def reply(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    symbol = str(symbol or "").upper().strip()
+    if not symbol or not symbol.isalnum():
+        return reply({"ok": False, "error": f"无效的 symbol: {symbol!r}"})
+    already = symbol in tracker.subscribed_symbols
+    payload = {"ok": True, "symbol": symbol, "added": not already, "symbols": sorted(tracker.subscribed_symbols)}
+    if not already:
+        if not tracker._loop or not tracker._client:
+            return reply({"ok": False, "error": "行情服务尚未准备完成"})
+        tracker.add_symbols(symbol)  # creates the book and triggers a WS resubscribe via _changed
+        future = asyncio.run_coroutine_threadsafe(tracker.calibrate_new_symbol(symbol), tracker._loop)
+        try:
+            future.result(timeout=60)
+        except Exception as exc:
+            logging.getLogger("error").exception("chart add symbol failed symbol=%s", symbol)
+            tracker.remove_symbols(symbol)  # roll back: unsubscribe stream and drop the empty book
+            with tracker._symbols_lock:
+                tracker.books.pop(symbol, None)
+            return reply({"ok": False, "error": f"订阅 {symbol} 失败: {exc}"})
+        payload["symbols"] = sorted(tracker.subscribed_symbols)
+        logging.getLogger("app").info("chart add symbol ok symbol=%s total=%d", symbol, len(payload["symbols"]))
+    return reply(payload)
+
 def reload_price_precisions():
     if not tracker._loop or not tracker._client:
         return {"ok": False, "error": "行情服务尚未准备完成", "price_precisions": dict(tracker._price_precisions)}

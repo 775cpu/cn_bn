@@ -201,29 +201,64 @@ class BinanceTracker:
 
     async def _check_mismatch_symbol(self, symbol: str) -> None:
         assert self._client is not None
-        book = self.books[symbol]
+        if symbol not in self.books:
+            return
         symbol_log = setup_symbol_mismatch_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
         for interval in self.settings.intervals:
-            try:
-                incoming = await self._client.klines(symbol, interval, self.settings.history_limit)
-                old = {bar.open_time: bar for bar in book.bars(interval)}
-                for bar in incoming:
-                    prior = old.get(bar.open_time)
-                    if prior and prior.closed and bar.closed:
-                        fields = ("open", "high", "low", "close", "volume", "quote_volume")
-                        differences = {
-                            field: {"live": getattr(prior, field), "rest": getattr(bar, field)}
-                            for field in fields
-                            if not math.isclose(getattr(prior, field), getattr(bar, field), rel_tol=1e-12, abs_tol=1e-8)
-                        }
-                        if differences:
-                            message = "mismatch interval=%s open_time=%d closed=%s fields=%s live=%s rest=%s"
-                            values = (interval, bar.open_time, bar.closed, differences, prior.as_dict(), bar.as_dict())
-                            symbol_log.error(message, *values)
-                book.merge_mismatch(interval, incoming)
-            except Exception:
-                symbol_log.exception("mismatch check failed interval=%s", interval)
-                error_log.exception("mismatch check failed symbol=%s interval=%s", symbol, interval)
+            await self._calibrate_interval(symbol, interval, symbol_log)
+
+    async def _calibrate_interval(self, symbol: str, interval: str, symbol_log=None) -> bool:
+        """Fetch REST klines for one interval, log live/rest differences and merge them. Returns whether bars were loaded."""
+        assert self._client is not None
+        book = self.books.get(symbol)
+        if book is None:
+            return False
+        if symbol_log is None:
+            symbol_log = setup_symbol_mismatch_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
+        try:
+            incoming = await self._client.klines(symbol, interval, self.settings.history_limit)
+            old = {bar.open_time: bar for bar in book.bars(interval)}
+            for bar in incoming:
+                prior = old.get(bar.open_time)
+                if prior and prior.closed and bar.closed:
+                    fields = ("open", "high", "low", "close", "volume", "quote_volume")
+                    differences = {
+                        field: {"live": getattr(prior, field), "rest": getattr(bar, field)}
+                        for field in fields
+                        if not math.isclose(getattr(prior, field), getattr(bar, field), rel_tol=1e-12, abs_tol=1e-8)
+                    }
+                    if differences:
+                        message = "mismatch interval=%s open_time=%d closed=%s fields=%s live=%s rest=%s"
+                        values = (interval, bar.open_time, bar.closed, differences, prior.as_dict(), bar.as_dict())
+                        symbol_log.error(message, *values)
+            book.merge_mismatch(interval, incoming)
+            return bool(incoming)
+        except Exception:
+            symbol_log.exception("mismatch check failed interval=%s", interval)
+            error_log.exception("mismatch check failed symbol=%s interval=%s", symbol, interval)
+            return False
+
+    async def calibrate_new_symbol(self, symbol: str) -> None:
+        """Calibrate a symbol added at runtime: validate it, REST-calibrate every interval in parallel and load its price precision."""
+        if self._client is None:
+            raise RuntimeError("行情服务尚未准备完成")
+        symbol = symbol.upper().strip()
+        if symbol not in self.books:
+            raise KeyError(symbol)
+        symbol_log = setup_symbol_mismatch_logging(self.settings.log_dir, symbol, self.settings.log_max_bytes, self.settings.log_backup_count)
+        try:
+            probe = await self._client.klines(symbol, self.settings.intervals[0], 1)
+        except Exception as exc:
+            raise ValueError(f"无效的 symbol: {symbol}") from exc
+        if not probe:
+            raise ValueError(f"无效的 symbol: {symbol}")
+        app_log.info("new symbol calibration started symbol=%s intervals=%d", symbol, len(self.settings.intervals))
+        results = await asyncio.gather(*(self._calibrate_interval(symbol, interval, symbol_log) for interval in self.settings.intervals))
+        book = self.books.get(symbol)
+        if book is None or not book.bars(self.settings.intervals[0]):
+            raise ValueError(f"无法获取 {symbol} 的 K 线数据，请稍后重试")
+        await self._load_price_precisions()
+        app_log.info("new symbol calibration completed symbol=%s intervals_ok=%d/%d", symbol, sum(1 for ok in results if ok), len(results))
 
     async def _mismatch_loop(self) -> None:
         while not self._stop.is_set():

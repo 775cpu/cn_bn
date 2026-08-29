@@ -121,6 +121,9 @@ class BinanceClient:
                 network_log.warning("REST %s %s attempt=%d: %s", symbol, interval, attempt + 1, exc)
                 if attempt == 2:
                     raise
+                # Client-side errors (e.g. -1121 invalid symbol) are permanent; fail fast instead of retrying.
+                if isinstance(exc, aiohttp.ClientResponseError) and exc.status in (400, 401, 403, 404):
+                    raise
                 await asyncio.sleep(2 ** attempt)
         return []
 
