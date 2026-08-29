@@ -64,6 +64,45 @@ def chart_history(response, symbol, interval, end_time, limit=100):
     response.set_header("Content-Type", "application/json; charset=utf-8")
     response.set_data(json.dumps({"type": "history", "symbol": symbol, "interval": interval, "bars": bars}, ensure_ascii=False))
 
+def chart_drill_extreme(symbol, start_time, interval, side="high"):
+    """Pure-text RPC API: server-side recursive drill-down from a selected bar to the exact
+    1s bar where its high (side='high') or low (side='low') occurred. The recursion
+    (coarse interval -> finer -> 1s, each level <=1000 bars in one REST request) runs
+    entirely on the server. Call as
+    r=chart_drill_extreme(symbol='ETHUSDT',start_time=1788000000000,interval='12h',side='high');
+    returns JSON {"ok": true, "bar": <1s kline dict>, "path": [{interval, open_time, high, low}, ...]}."""
+    def reply(payload: dict) -> str:
+        return json.dumps(payload, ensure_ascii=False)
+
+    try:
+        symbol = normalize_symbol(symbol)
+        start_time = int(start_time)
+        interval = str(interval)
+        side = str(side)
+    except (TypeError, ValueError):
+        return reply({"ok": False, "error": "start_time 必须是整数毫秒时间戳"})
+    if side not in ("high", "low"):
+        return reply({"ok": False, "error": "side 必须是 high 或 low"})
+    if symbol not in tracker.books:
+        return reply({"ok": False, "error": f"未订阅 {symbol}"})
+    if not tracker._loop or not tracker._client:
+        return reply({"ok": False, "error": "行情服务尚未准备完成"})
+    future = asyncio.run_coroutine_threadsafe(
+        tracker.drill_extreme(symbol, start_time, interval, side), tracker._loop
+    )
+    try:
+        result = future.result(timeout=60)
+    except Exception as exc:
+        logging.getLogger("error").exception(
+            "chart drill extreme failed symbol=%s start_time=%s interval=%s side=%s", symbol, start_time, interval, side
+        )
+        return reply({"ok": False, "error": f"钻取失败: {type(exc).__name__}: {exc}"})
+    logging.getLogger("app").info(
+        "chart drill extreme ok symbol=%s side=%s levels=%d 1s_time=%d",
+        symbol, side, len(result["path"]), result["bar"]["open_time"],
+    )
+    return reply({"ok": True, "symbol": symbol, "interval": interval, **result})
+
 def chart_add_symbol(symbol):
     """Pure-text RPC API: subscribe a new symbol at runtime (auto-subscribe WS stream,
     REST-calibrate klines, load price precision). Call as r=chart_add_symbol(symbol='ETHUSDT');

@@ -6,9 +6,8 @@
       <div class="controls">
         <label class="symbol-add">
           <input v-model.trim="newSymbol" placeholder="订阅 SYMBOL" :disabled="addingSymbol" spellcheck="false" autocomplete="off"
-                 @keydown.enter="addSymbol()" @keydown.esc="closePanels" @input="symbolStatus = ''" @focus="openTickerPanel">
+                 @keydown.enter="addSymbol()" @keydown.esc="closePanels" @focus="openTickerPanel">
           <button class="add-button" type="button" :disabled="addingSymbol || !newSymbol" title="订阅新 symbol：自动订阅 WS 并校准 K 线" @click="addSymbol()">{{ addingSymbol ? '…' : '＋' }}</button>
-          <span v-if="symbolStatus" class="symbol-status" :class="{ error: symbolStatusError }">{{ symbolStatus }}</span>
         </label>
         <label class="symbol-picker">SYMBOL
           <div class="symbol-menu">
@@ -56,13 +55,22 @@
       <footer v-if="tickerHiddenTotal > 0" class="ticker-panel-foot">部分组别仅显示涨跌幅最活跃的前 {{ tickerGroupCap }} 个（{{ tickerHiddenTotal }} 个已折叠），在输入框键入 symbol 可精确筛选</footer>
     </section>
     <div class="status"><i :class="{ online: connected }"></i>{{ connected ? 'LIVE' : 'CONNECTING' }}</div>
-    <div class="chart-wrap"><div ref="chart" class="chart"></div><div class="scale-controls"><button title="Auto: 让 K 线和指标尽量铺满屏幕" :class="{ active: autoScale }" @click="toggleAutoScale">A</button><button title="锁定价格尺度" :class="{ active: scaleLocked }" @click="toggleScaleLock">L</button></div></div>
-    <footer><span>实时行情</span><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint">WebSocket stream</span></footer>
+    <div class="chart-wrap" @contextmenu.prevent="onChartContextMenu">
+      <div ref="chart" class="chart"></div>
+      <div class="scale-controls"><button title="Auto: 让 K 线和指标尽量铺满屏幕" :class="{ active: autoScale }" @click="toggleAutoScale">A</button><button title="锁定价格尺度" :class="{ active: scaleLocked }" @click="toggleScaleLock">L</button></div>
+      <div v-if="contextMenu" class="ctx-overlay" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu"></div>
+      <div v-if="contextMenu" class="ctx-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop @contextmenu.prevent>
+        <div class="ctx-title">{{ symbol }} · {{ interval }} · {{ formatTime(contextMenu.bar.timestamp) }}</div>
+        <button type="button" :disabled="drilling" @click="drillExtreme('high')"><span>跳到最高价那一秒</span><b class="up">{{ formatTickerPrice(contextMenu.bar.high) }}</b></button>
+        <button type="button" :disabled="drilling" @click="drillExtreme('low')"><span>跳到最低价那一秒</span><b class="down">{{ formatTickerPrice(contextMenu.bar.low) }}</b></button>
+      </div>
+    </div>
+    <footer><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint foot-log" :class="{ active: footLog, error: footLogError }" :title="footLog">{{ footLog || 'WebSocket stream' }}</span></footer>
   </main>
 </template>
 
 <script>
-import { dispose, init } from 'klinecharts';
+import { ActionType, dispose, init } from 'klinecharts';
 
 export default {
   name: 'RealtimeChart',
@@ -73,10 +81,11 @@ export default {
       autoScale: true, scaleLocked: false, pricePrecision: 8, latency: '--', serverTime: '--', pendingHistory: null, historyRetryTimer: null, historyRetryCount: 0, requestedHistory: new Set(), historyExhausted: false, chartGeneration: 0,
       symbols: window.__SYMBOLS__ || ['BTCUSDT'],
       intervals: window.__INTERVALS__ || ['1m'],
-      newSymbol: '', addingSymbol: false, symbolStatus: '', symbolStatusError: false, symbolStatusTimer: null,
+      newSymbol: '', addingSymbol: false, footLog: '', footLogError: false, footLogTimer: null,
       tickers: Array.isArray(window.__TICKERS__) ? window.__TICKERS__ : [],
       tickerTime: Number(window.__TICKER_TIME__) || 0,
       loadingTickers: false, showTickerPanel: false, showSymbolMenu: false,
+      crosshairBar: null, contextMenu: null, drilling: false, drillTarget: null,
       tickerSortKey: 'pct', tickerSortDesc: true,
       tickerSortOptions: [
         { key: 'pct', label: '涨跌幅', hint: '按 24h 涨跌幅绝对值排序（再点切换正/倒序）' },
@@ -132,7 +141,7 @@ export default {
     },
     barCount() { return this.bars.length; },
     lastBar() { return this.bars[this.bars.length - 1] || {}; },
-    lastPrice() { return this.lastBar.close == null ? '--' : Number(this.lastBar.close).toLocaleString(undefined, { maximumFractionDigits: 8 }); },
+    lastPrice() { return this.lastBar.close == null ? '--' : Number(this.lastBar.close).toLocaleString(undefined, { minimumFractionDigits: this.pricePrecision, maximumFractionDigits: this.pricePrecision }); },
     lastTime() { return this.lastBar.timestamp ? this.formatTime(this.lastBar.timestamp) : '--'; },
     changeText() {
       if (!this.lastBar.open) return '--';
@@ -148,6 +157,10 @@ export default {
     this.chart.setStyles({ grid: { horizontal: { color: '#263238' }, vertical: { color: '#263238' } }, candle: { type: 'candle_solid', bar: { upColor: '#35c99a', downColor: '#ef6b73', noChangeColor: '#9aa6ab' } } });
     this.chart.createIndicator({ name: 'BOLL', calcParams: [21, 3] }, false, { id: 'candle_pane' });
     this.chart.createIndicator('VOL');
+    // Track the bar under the crosshair so the right-click menu can drill into it.
+    this.chart.subscribeAction(ActionType.OnCrosshairChange, (data) => {
+      this.crosshairBar = data?.kLineData || null;
+    });
     this.chart.setLoadDataCallback(({ type, data, callback }) => {
       if (type !== 'forward') {
         callback([], false);
@@ -163,12 +176,29 @@ export default {
     this.updateAxisMode();
     this.connect();
   },
-  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearTimeout(this.symbolStatusTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
+  beforeUnmount() { clearTimeout(this.reconnectTimer); clearTimeout(this.historyRetryTimer); clearTimeout(this.footLogTimer); clearInterval(this.pingTimer); this.socket?.close(); dispose(this.$refs.chart); },
   methods: {
     log(event, details) {
-      if (event === 'history-rpc-error' || event === 'history-rejected-gap' || event === 'ws-error' || event === 'server-error') {
+      // Notable events are mirrored to the footer log label; high-frequency debug
+      // events (ws-message/update/pong/history-applied...) stay console-only.
+      const footMessages = {
+        'history-rpc-error': ['历史行情加载失败', true],
+        'ws-error': ['WebSocket 连接异常，正在重连…', true],
+        'server-error': [`服务器错误：${details?.message || ''}`, true],
+        'history-rejected-gap': ['历史行情存在缺口，已跳过不连续部分', false],
+      };
+      const hit = footMessages[event];
+      if (hit) {
         console.error(`[realtime-chart] ${event}`, details || '');
+        this.setFootLog(hit[0], hit[1]);
       }
+    },
+    setFootLog(message, isError = false) {
+      this.footLog = message || '';
+      this.footLogError = !!isError;
+      clearTimeout(this.footLogTimer);
+      // Temporary log label: revert to the default "WebSocket stream" hint after a few seconds.
+      if (message) this.footLogTimer = setTimeout(() => { this.footLog = ''; }, isError ? 60*1000 : 10*1000);
     },
     formatTime(timestamp) {
       return new Intl.DateTimeFormat('zh-CN', {
@@ -219,7 +249,7 @@ export default {
         if (!more) this.historyExhausted = true;
         this.log('history-applied', { bars: history.length, more, oldest: history[0]?.timestamp });
       }).catch((error) => {
-        console.error('[realtime-chart] history-rpc-error', error);
+        this.log('history-rpc-error', { error: error.message || String(error) });
         if (this.pendingHistory?.generation === this.chartGeneration) {
           const pendingCallback = this.pendingHistory.callback;
           this.pendingHistory = null;
@@ -254,12 +284,6 @@ export default {
         }, true);
       }
     },
-    showSymbolStatus(message, isError) {
-      this.symbolStatus = message;
-      this.symbolStatusError = !!isError;
-      clearTimeout(this.symbolStatusTimer);
-      if (isError && message) this.symbolStatusTimer = setTimeout(() => { this.symbolStatus = ''; }, 6000);
-    },
     openTickerPanel() {
       this.showSymbolMenu = false;
       this.showTickerPanel = true;
@@ -287,7 +311,7 @@ export default {
         this.log('tickers-loaded', { count: this.tickers.length });
       }).catch((error) => {
         console.error('[realtime-chart] tickers-rpc-error', error);
-        this.showSymbolStatus('交易对行情加载失败', true);
+        this.setFootLog('交易对行情加载失败', true);
       }).finally(() => {
         this.loadingTickers = false;
       });
@@ -369,7 +393,7 @@ export default {
         }
       }).catch((error) => {
         console.error('[realtime-chart] remove-symbol-error', error);
-        this.showSymbolStatus(error.message || String(error), true);
+        this.setFootLog(error.message || String(error), true);
       });
     },
     // 与后端 normalize_symbol 同一规则：symbol 是单个 token，允许非 ASCII（如中文 meme 币 币安人生USDT）；
@@ -383,13 +407,13 @@ export default {
       const symbol = (explicitSymbol || this.newSymbol || '').toUpperCase().trim();
       if (!symbol || this.addingSymbol) return;
       if (!trusted && !this.isValidSymbolInput(symbol)) {
-        this.showSymbolStatus('symbol 格式无效：不能为空且不含空格/引号，如 BTCUSDT', true);
+        this.setFootLog('symbol 格式无效：不能为空且不含空格/引号，如 BTCUSDT', true);
         return;
       }
       const switchTo = () => {
         this.addingSymbol = false;
         this.newSymbol = '';
-        this.symbolStatus = '';
+        this.setFootLog(`已订阅 ${symbol}`, false);
         this.closePanels();
         if (this.symbol !== symbol) {
           this.symbol = symbol;
@@ -398,7 +422,7 @@ export default {
       };
       if (this.symbols.includes(symbol)) { switchTo(); return; }
       this.addingSymbol = true;
-      this.showSymbolStatus('订阅与 K 线校准中…', false);
+      this.setFootLog('订阅与 K 线校准中…', false);
       const expression = `r=chart_add_symbol(symbol='${symbol}')`;
       const url = `/r=${encodeURIComponent(expression)}`;
       this.log('add-symbol-request', { url });
@@ -411,7 +435,7 @@ export default {
       }).catch((error) => {
         console.error('[realtime-chart] add-symbol-error', error);
         this.addingSymbol = false;
-        this.showSymbolStatus(error.message || String(error), true);
+        this.setFootLog(error.message || String(error), true);
       });
     },
     subscribe() {
@@ -442,7 +466,7 @@ export default {
       this.socket = socket;
       socket.onopen = () => { if (socket !== this.socket) return; this.connected = true; this.log('ws-open'); };
       socket.onclose = (event) => { if (socket !== this.socket) return; this.connected = false; this.log('ws-close', event); this.reconnectTimer = setTimeout(() => this.connect(), 1000); };
-      socket.onerror = (event) => { if (socket !== this.socket) return; this.connected = false; console.error('[realtime-chart] ws-error', event); };
+      socket.onerror = (event) => { if (socket !== this.socket) return; this.connected = false; this.log('ws-error', event); };
       socket.onmessage = (event) => {
         if (socket !== this.socket) return;
         const message = JSON.parse(event.data);
@@ -458,6 +482,7 @@ export default {
           this.historyExhausted = false;
           this.chart.applyNewData(this.bars);
           this.updateAxisMode();
+          if (this.drillTarget) this.openDrillWindow();
         } else if (message.type === 'update') {
           const bar = this.toChartBar(message.bar);
           const index = this.bars.findIndex((item) => item.timestamp === bar.timestamp);
@@ -478,7 +503,7 @@ export default {
           this.serverTime = this.formatTime(message.server_time);
           this.log('ws-pong', { latency: this.latency });
         } else if (message.type === 'error') {
-          console.error('[realtime-chart] server-error', message.message);
+          this.log('server-error', { message: message.message });
         }
       };
       clearInterval(this.pingTimer);
@@ -487,6 +512,89 @@ export default {
           this.socket.send(JSON.stringify({ type: 'ping', sent_at: performance.now() }));
         }
       }, 1000);
+    },
+    onChartContextMenu(event) {
+      const bar = this.crosshairBar;
+      if (this.drilling || !bar || !Number.isFinite(bar.timestamp)) {
+        this.contextMenu = null;
+        return;
+      }
+      this.contextMenu = {
+        x: Math.min(event.clientX, window.innerWidth - 250),
+        y: Math.min(event.clientY, window.innerHeight - 130),
+        bar,
+      };
+    },
+    closeContextMenu() { this.contextMenu = null; },
+    drillExtreme(side) {
+      const bar = this.contextMenu?.bar;
+      this.contextMenu = null;
+      if (!bar || this.drilling) return;
+      this.drilling = true;
+      this.setFootLog(`正在服务器端递归钻取${side === 'high' ? '最高' : '最低'}价到 1s…`, false);
+      // One RPC: the server recurses coarse -> fine -> 1s internally (each level <= 1000 bars).
+      const expression = `r=chart_drill_extreme(symbol='${this.symbol}',start_time=${bar.timestamp},interval='${this.interval}',side='${side}')`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('drill-request', { url });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error || !data.ok) throw new Error(data.error || `HTTP ${response.status}`);
+        this.log('drill-ok', { side, levels: data.path?.length, bar: data.bar, path: data.path });
+        const target = {
+          timestamp: data.bar.open_time,
+          side,
+          price: side === 'high' ? data.bar.high : data.bar.low,
+          levels: Array.isArray(data.path) ? data.path.length : 0,
+        };
+        this.drillTarget = target;
+        if (this.interval !== '1s') {
+          // Switch the live stream to 1s; openDrillWindow runs once the fresh 1s snapshot arrives.
+          this.interval = '1s';
+          this.subscribe();
+        } else {
+          this.openDrillWindow();
+        }
+      }).catch((error) => {
+        console.error('[realtime-chart] drill-error', error);
+        this.drillTarget = null;
+        this.setFootLog(error.message || String(error), true);
+      }).finally(() => {
+        this.drilling = false;
+      });
+    },
+    openDrillWindow() {
+      const target = this.drillTarget;
+      if (!target) return;
+      // 1000 1s bars ending 600s after the target second: the target bar is always inside the window.
+      const endTime = target.timestamp + 600_000;
+      const expression = `chart_history(p,symbol='${this.symbol}',interval='1s',end_time=${endTime},limit=1000)`;
+      const url = `/r=${encodeURIComponent(expression)}`;
+      this.log('drill-window-request', { url, target: target.timestamp });
+      fetch(url).then((response) => response.json().then((data) => ({ response, data }))).then(({ response, data }) => {
+        if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+        const history = (data.bars || [])
+          .map((bar) => this.toChartBar(bar))
+          .filter((bar) => Number.isFinite(bar.timestamp))
+          .sort((a, b) => a.timestamp - b.timestamp);
+        const merged = new Map(history.concat(this.bars).map((bar) => [bar.timestamp, bar]));
+        this.bars = Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        this.chartGeneration += 1;
+        this.pendingHistory = null;
+        this.requestedHistory = new Set();
+        this.historyExhausted = false;
+        this.chart.applyNewData(this.bars);
+        this.updateAxisMode();
+        this.chart.scrollToTimestamp(target.timestamp, 0);
+        const pixel = this.chart.convertToPixel({ timestamp: target.timestamp }, { paneId: 'candle_pane' });
+        if (pixel && Number.isFinite(pixel.x)) {
+          this.chart.executeAction(ActionType.OnCrosshairChange, { x: pixel.x, paneId: 'candle_pane' });
+        }
+        this.drillTarget = null;
+        this.setFootLog(`已定位到 1s ${target.side === 'high' ? '最高' : '最低'}价 ${this.formatTickerPrice(target.price)} · ${this.formatTime(target.timestamp)}（服务端钻取 ${target.levels} 层，滚轮可继续看前后秒）`, false);
+      }).catch((error) => {
+        console.error('[realtime-chart] drill-window-error', error);
+        this.drillTarget = null;
+        this.setFootLog('1s 定位窗口加载失败: ' + (error.message || error), true);
+      });
     },
     toggleFullscreen() { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); },
   },

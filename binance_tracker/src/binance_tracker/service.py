@@ -10,13 +10,23 @@ import threading
 import aiohttp
 from .aggregator import SymbolBook
 from .client import BinanceClient
-from .config import Settings
+from .config import INTERVAL_MS, Settings
 from .logging_setup import setup_symbol_mismatch_logging
 from .display import TerminalDisplay
 
 app_log = logging.getLogger("app")
 mismatch_log = logging.getLogger("mismatch")
 error_log = logging.getLogger("error")
+
+
+# Drill-down ladder for extreme-point location: finest interval first. At each level the
+# finest interval whose whole window fits in <=1000 bars (REST klines limit) is chosen,
+# the extreme child bar is picked, then the window shrinks to that child bar and repeats.
+# Examples: 1M -> 1h(720) -> 1m(60) -> 1s(60); 12h -> 1m(720) -> 1s(60); 1d -> 3m(480) -> 1s(180).
+DRILL_LADDER: tuple[tuple[str, int], ...] = tuple(
+    (interval, INTERVAL_MS[interval])
+    for interval in ("1s", "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w")
+)
 
 
 def normalize_symbol(symbol) -> str:
@@ -399,6 +409,62 @@ class BinanceTracker:
             symbol_log.exception("mismatch check failed interval=%s", interval)
             error_log.exception("mismatch check failed symbol=%s interval=%s", symbol, interval)
             return False
+
+    def _bar_window_end(self, symbol: str, interval: str, start_time: int) -> int:
+        """Exclusive end (open_time of the next bar) of the bar that opened at start_time.
+        Fixed-length intervals use INTERVAL_MS; for 1M the next monthly bar's open_time is
+        taken from the local book (fallback: start_time + 32 days)."""
+        step = INTERVAL_MS.get(interval)
+        if step:
+            return start_time + step
+        if interval == "1M":
+            book = self.books.get(symbol)
+            if book is not None:
+                next_open = next((bar.open_time for bar in book.bars("1M") if bar.open_time > start_time), None)
+                if next_open:
+                    return next_open
+            return start_time + 32 * INTERVAL_MS["1d"]
+        raise ValueError(f"unsupported interval: {interval!r}")
+
+    async def drill_extreme(self, symbol: str, start_time: int, interval: str, side: str) -> dict:
+        """Server-side recursive drill-down: inside the selected bar's time window
+        [start_time, next bar open), locate the exact 1s bar where the extreme
+        (side='high' | 'low') happened.
+
+        Each iteration picks the finest ladder interval whose bars for the current
+        window fit in one REST request (<=1000), takes the extreme child bar (ties
+        keep the earliest), then shrinks the window to that child bar and repeats
+        until 1s precision. The whole recursion runs server-side in one RPC call.
+        Returns {"bar": <1s kline dict>, "path": [per-level extreme info], "side": side}.
+        """
+        assert self._client is not None
+        if side not in ("high", "low"):
+            raise ValueError(f"invalid side: {side!r}")
+        window_start = int(start_time)
+        window_end = self._bar_window_end(symbol, interval, window_start)
+        path: list[dict] = []
+        while True:
+            width = window_end - window_start
+            level_interval, step = next(
+                ((name, ms) for name, ms in DRILL_LADDER if (width + ms - 1) // ms <= 1000),
+                DRILL_LADDER[-1],
+            )
+            limit = min(1000, (width + step - 1) // step + 1)
+            bars = await self._client.klines(symbol, level_interval, limit, end_time=window_end - 1)
+            in_window = [bar for bar in bars if window_start <= bar.open_time < window_end]
+            if not in_window:
+                raise RuntimeError(f"drill: no {level_interval} bars in window {window_start}..{window_end} for {symbol}")
+            # max()/min() keep the first item on ties; bars arrive in time order, so the earliest extreme wins.
+            extreme = (max if side == "high" else min)(in_window, key=lambda bar: getattr(bar, side))
+            path.append({"interval": level_interval, "open_time": extreme.open_time, "high": extreme.high, "low": extreme.low})
+            app_log.info(
+                "drill level symbol=%s side=%s interval=%s window=%d..%d bars=%d extreme_time=%d extreme=%s",
+                symbol, side, level_interval, window_start, window_end, len(in_window), extreme.open_time, getattr(extreme, side),
+            )
+            if level_interval == "1s":
+                return {"bar": extreme.as_dict(), "path": path, "side": side}
+            window_start = extreme.open_time
+            window_end = extreme.open_time + step
 
     async def calibrate_new_symbol(self, symbol: str) -> None:
         """Calibrate a symbol added at runtime: validate it, REST-calibrate every interval in parallel and load its price precision."""
