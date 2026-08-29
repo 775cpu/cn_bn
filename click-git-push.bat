@@ -10,7 +10,7 @@ set "SIZE_THRESHOLD=104857600"
 
 :: 判断输入参数是否为空，为空则默认参数 -v3 -u push
 if "%*"=="" (
-    "%PY_PATH%" "D:\test\github\git.bat\git_logic.py" -v3 -u push
+    "%PY_PATH%" "D:\test\github\git.bat\git_logic.py" -v3 --retry=99 -u push
 ) else (
     "%PY_PATH%" "D:\test\github\git.bat\git_logic.py" %*
 )

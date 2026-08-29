@@ -36,13 +36,9 @@ def pretty_format(obj, width=120):
             return repr(obj)
 
 def stime():
-    import time
     ft = time.time()
-    sf = str(ft)
-    tail = sf.split('.')[1][:3]
-    while len(tail) < 3:
-        tail = '0' + tail
-    return time.strftime('%Y-%m-%d__%H.%M.%S', time.localtime(ft)) + '__.' + tail
+    return time.strftime('%Y-%m-%d__%H.%M.%S', time.localtime(ft)) + '__.' + f"{ft:.3f}".split('.')[1]
+#
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
@@ -310,11 +306,11 @@ class RPCRequestHandler(BaseHTTPRequestHandler):
                 else:
                     result_obj = f"no 'r' variable, locals keys: {list(exec_globals.keys())}"
 
-                # 处理直接赋值未写 await，但得到一个 coroutine 的情况（例如: r = tracker.get_klines() ）
-                if inspect.isawaitable(result_obj):
-                    result_obj = self._execute_coroutine(result_obj, exec_globals)
-                    if 'r' in self.locals_dict and inspect.isawaitable(self.locals_dict.get('r')):
-                        self.locals_dict['r'] = result_obj
+                # 不要 处理直接赋值未写 await，但得到一个 coroutine 的情况（例如: r = tracker.get_klines() ）
+                # if inspect.isawaitable(result_obj):
+                    # result_obj = self._execute_coroutine(result_obj, exec_globals)
+                    # if 'r' in self.locals_dict and inspect.isawaitable(self.locals_dict.get('r')):
+                        # self.locals_dict['r'] = result_obj
 
                 result_str = pretty_format(result_obj)
                 self.send_response(resp.status)
