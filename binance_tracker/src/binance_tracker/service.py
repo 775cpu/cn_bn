@@ -316,11 +316,14 @@ class BinanceTracker:
             try:
                 last_price = float(item.get("lastPrice") or 0.0)
                 change_percent = float(item.get("priceChangePercent") or 0.0)
+                # quoteVolume = 24h turnover denominated in the quote asset (comparable within a quoteAsset group)
+                quote_volume = float(item.get("quoteVolume") or 0.0)
             except (TypeError, ValueError):
                 continue
             if last_price <= 0:
                 continue
             cached.append({"symbol": symbol, "lastPrice": last_price, "priceChangePercent": change_percent,
+                           "quoteVolume": quote_volume,
                            "quoteAsset": (info or {}).get("quoteAsset", "")})
         if not cached:
             app_log.warning("24hr ticker refresh returned no usable symbols; keeping previous cache")

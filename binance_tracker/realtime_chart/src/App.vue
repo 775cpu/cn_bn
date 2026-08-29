@@ -31,15 +31,19 @@
     <div v-if="showTickerPanel || showSymbolMenu" class="pop-overlay" @click="closePanels"></div>
     <section v-if="showTickerPanel" class="ticker-panel">
       <header class="ticker-panel-head">
-        <span>全部交易对 · 按计价币分组（USDT 优先），组内按 24h 涨跌幅绝对值排序 · 共 {{ tickers.length }} 个<template v-if="newSymbol"> · 筛选出 {{ filteredTickers.length }} 个</template></span>
-        <span class="ticker-panel-hint">点击行订阅 / 切换；已订阅为绿色{{ loadingTickers ? ' · 行情加载中…' : tickerAgeText ? ' · ' + tickerAgeText : '' }}</span>
+        <span class="tsb-label">组内排序</span>
+        <button v-for="opt in tickerSortOptions" :key="opt.key" type="button" class="ticker-sort-btn"
+                :class="{ active: tickerSortKey === opt.key }" :title="opt.hint" @click="setTickerSort(opt.key)">
+          {{ opt.label }}<i v-if="tickerSortKey === opt.key">{{ tickerSortDesc ? '▼' : '▲' }}</i>
+        </button>
+        <span class="ticker-panel-hint">{{ tickers.length }} 个交易对<template v-if="newSymbol"> · 筛选 {{ filteredTickers.length }} 个</template> · 点击行订阅/切换，已订阅为绿色{{ loadingTickers ? ' · 行情加载中…' : tickerAgeText ? ' · ' + tickerAgeText : '' }}</span>
         <button type="button" class="ticker-panel-close" title="关闭" @click="closePanels">×</button>
       </header>
       <div class="ticker-grid">
         <template v-for="group in groupedTickers" :key="group.quote">
           <div class="ticker-group-head">{{ group.quote }}<span class="tgh-count">{{ group.items.length }}</span></div>
           <button v-for="item in group.shown" :key="item.symbol" type="button" class="ticker-cell"
-                  :class="{ subscribed: symbols.includes(item.symbol) }" :title="item.symbol" @click="pickTicker(item)">
+                  :class="{ subscribed: symbols.includes(item.symbol) }" :title="cellTitle(item)" @click="pickTicker(item)">
             <span class="tc-symbol">{{ item.symbol }}</span>
             <span class="tc-price">{{ formatTickerPrice(item.lastPrice) }}</span>
             <span class="tc-pct" :class="item.priceChangePercent >= 0 ? 'up' : 'down'">{{ formatPct(item.priceChangePercent) }}</span>
@@ -70,6 +74,13 @@ export default {
       tickers: Array.isArray(window.__TICKERS__) ? window.__TICKERS__ : [],
       tickerTime: Number(window.__TICKER_TIME__) || 0,
       loadingTickers: false, showTickerPanel: false, showSymbolMenu: false,
+      tickerSortKey: 'pct', tickerSortDesc: true,
+      tickerSortOptions: [
+        { key: 'pct', label: '涨跌幅', hint: '按 24h 涨跌幅绝对值排序（再点切换正/倒序）' },
+        { key: 'name', label: '名字', hint: '按 symbol 名字排序（再点切换正/倒序）' },
+        { key: 'vol', label: '成交额', hint: '按 24h 成交额（quoteVolume，计价币口径）排序（再点切换正/倒序）' },
+        { key: 'price', label: '价格', hint: '按最新价格排序（再点切换正/倒序）' },
+      ],
     };
   },
   computed: {
@@ -100,7 +111,7 @@ export default {
       });
       const cap = this.tickerGroupCap;
       for (const group of groups) {
-        group.items.sort((a, b) => Math.abs(b.priceChangePercent) - Math.abs(a.priceChangePercent));
+        group.items.sort((a, b) => this.tickerCompare(a, b));
         group.shown = group.items.slice(0, cap);
         group.hidden = group.items.length - group.shown.length;
       }
@@ -285,6 +296,44 @@ export default {
     formatPct(value) {
       if (!Number.isFinite(value)) return '--';
       return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    },
+    formatVolume(value) {
+      if (!Number.isFinite(value) || value <= 0) return '--';
+      if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
+      if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;
+      if (value >= 1e3) return `${(value / 1e3).toFixed(2)}K`;
+      return value.toFixed(2);
+    },
+    cellTitle(item) {
+      return `${item.symbol} · 价 ${this.formatTickerPrice(item.lastPrice)} · 幅 ${this.formatPct(item.priceChangePercent)} · 24h额 ${this.formatVolume(item.quoteVolume)}`;
+    },
+    setTickerSort(key) {
+      // Same key -> toggle direction; new key -> apply its default direction (name A-Z, others big-first).
+      if (this.tickerSortKey === key) {
+        this.tickerSortDesc = !this.tickerSortDesc;
+      } else {
+        this.tickerSortKey = key;
+        this.tickerSortDesc = key !== 'name';
+      }
+    },
+    tickerCompare(a, b) {
+      const dir = this.tickerSortDesc ? -1 : 1;
+      if (this.tickerSortKey === 'name') {
+        return (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0) * dir;
+      }
+      let va = 0;
+      let vb = 0;
+      if (this.tickerSortKey === 'pct') {
+        va = Math.abs(a.priceChangePercent);
+        vb = Math.abs(b.priceChangePercent);
+      } else if (this.tickerSortKey === 'vol') {
+        va = a.quoteVolume || 0;
+        vb = b.quoteVolume || 0;
+      } else {
+        va = a.lastPrice || 0;
+        vb = b.lastPrice || 0;
+      }
+      return (va - vb) * dir;
     },
     pickTicker(item) {
       if (this.symbols.includes(item.symbol)) {

@@ -33,18 +33,23 @@ footer { min-height: 27px; display: flex; gap: 20px; align-items: center; paddin
 /* ---- all-symbol 24hr ticker panel: compact multi-column grid ---- */
 .pop-overlay { position: fixed; inset: 0; z-index: 40; background: rgba(2,8,7,.45); }
 .ticker-panel { position: fixed; z-index: 41; top: 44px; left: 50%; transform: translateX(-50%); width: min(1280px, 97vw); max-height: calc(100vh - 64px); display: flex; flex-direction: column; border: 1px solid #39504e; border-radius: 4px; background: rgba(11,20,19,.98); box-shadow: 0 14px 44px rgba(0,0,0,.6); overflow: hidden; }
-.ticker-panel-head { display: flex; align-items: center; gap: 14px; padding: 6px 10px; border-bottom: 1px solid #263538; color: #8da4a1; font-size: 11px; white-space: nowrap; }
-.ticker-panel-hint { color: #5f7a74; overflow: hidden; text-overflow: ellipsis; }
-.ticker-panel-close { margin-left: auto; width: 24px; height: 24px; padding: 0; font-size: 15px; line-height: 1; flex: 0 0 auto; }
-.ticker-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(184px, 1fr)); gap: 1px; padding: 1px; background: #1d302e; }
+.ticker-panel-head { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 4px 8px; border-bottom: 1px solid #263538; color: #8da4a1; font-size: 11px; white-space: nowrap; }
+.tsb-label { color: #5f7a74; font-size: 10px; letter-spacing: 1px; white-space: nowrap; }
+.ticker-sort-btn { width: auto; height: 20px; margin: 0; padding: 0 8px; display: inline-flex; align-items: center; gap: 4px; border: 1px solid #263538; border-radius: 2px; background: #12201e; color: #8da4a1; font: 500 11px 'IBM Plex Mono', monospace; cursor: pointer; white-space: nowrap; }
+.ticker-sort-btn:hover { border-color: #39504e; color: #cfe0db; }
+.ticker-sort-btn.active { border-color: #35c99a; color: #35c99a; background: #10231d; }
+.ticker-sort-btn i { font-style: normal; font-size: 9px; }
+.ticker-panel-hint { flex: 1 1 auto; min-width: 0; margin-left: 4px; color: #5f7a74; font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.ticker-panel-close { margin-left: auto; width: 22px; height: 22px; padding: 0; font-size: 15px; line-height: 1; flex: 0 0 auto; }
+.ticker-grid { flex: 1; min-height: 0; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(192px, 1fr)); gap: 1px; padding: 1px; background: #1d302e; }
 .ticker-group-head { grid-column: 1 / -1; position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 8px; background: #142622; border-top: 1px solid #2c423d; color: #8fd8c4; font: 600 11px 'IBM Plex Mono', monospace; letter-spacing: 1.5px; }
 .ticker-group-head .tgh-count { color: #5f7a74; font-weight: 400; letter-spacing: 0; }
-.ticker-cell { width: auto; height: 24px; margin: 0; padding: 0 8px; border: none; border-radius: 0; background: #0d1615; display: flex; align-items: center; gap: 6px; font: 500 11px 'IBM Plex Mono', monospace; color: #cfe0db; text-align: left; white-space: nowrap; cursor: pointer; }
+.ticker-cell { width: auto; height: 24px; margin: 0; padding: 0 7px; border: none; border-radius: 0; background: #0d1615; display: flex; align-items: center; gap: 5px; font: 500 11px 'IBM Plex Mono', monospace; color: #cfe0db; text-align: left; white-space: nowrap; cursor: pointer; }
 .ticker-cell:hover { border-color: transparent; background: #16302b; color: #e9f0ee; }
 .ticker-cell.subscribed { background: #10231d; }
 .ticker-cell.subscribed .tc-symbol { color: #35c99a; }
-.tc-symbol { font-weight: 600; letter-spacing: .3px; overflow: hidden; text-overflow: ellipsis; }
-.tc-price { margin-left: auto; color: #8fa8a3; overflow: hidden; text-overflow: ellipsis; }
-.tc-pct { flex: 0 0 64px; text-align: right; font-weight: 600; }
+.tc-symbol { flex: 0 1 auto; min-width: 0; font-weight: 600; letter-spacing: .3px; overflow: hidden; text-overflow: ellipsis; }
+.tc-price { flex: 0 0 auto; margin-left: auto; color: #8fa8a3; white-space: nowrap; }
+.tc-pct { flex: 0 0 56px; text-align: right; font-weight: 600; white-space: nowrap; }
 .ticker-panel-foot { padding: 5px 10px; border-top: 1px solid #263538; color: #5f7a74; font-size: 10px; }
 @media (max-width: 650px) { .toolbar { padding: 0 12px; gap: 8px; }.brand { font-size: 15px; }.quote { display: none; }.controls { width: auto; flex-wrap: wrap; }.controls label { flex: 1; }.controls select { width: calc(100% - 65px); } .symbol-add { flex: 0 0 auto; } .symbol-add input { width: 96px; } .symbol-status { display: none; } footer { gap: 9px; } .ticker-panel { width: 98vw; top: 40px; } .ticker-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); } .ticker-panel-hint { display: none; } .symbol-menu-panel { right: 0; width: 170px; } }

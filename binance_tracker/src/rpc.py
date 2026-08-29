@@ -36,6 +36,7 @@ def pretty_format(obj, width=120):
             return repr(obj)
 
 def stime():
+    import time
     ft = time.time()
     return time.strftime('%Y-%m-%d__%H.%M.%S', time.localtime(ft)) + '__.' + f"{ft:.3f}".split('.')[1]
 #
