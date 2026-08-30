@@ -60,9 +60,10 @@
       <div class="scale-controls"><button title="Auto: 让 K 线和指标尽量铺满屏幕" :class="{ active: autoScale }" @click="toggleAutoScale">A</button><button title="锁定价格尺度" :class="{ active: scaleLocked }" @click="toggleScaleLock">L</button></div>
       <div v-if="contextMenu" class="ctx-overlay" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu"></div>
       <div v-if="contextMenu" class="ctx-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop @contextmenu.prevent>
-        <div class="ctx-title">{{ symbol }} · {{ interval }} · {{ formatTime(contextMenu.bar.timestamp) }}</div>
+        <div class="ctx-title">{{ symbol }} · {{ interval }} · {{ contextMenu.bar.timestamp }} · {{ formatTime(contextMenu.bar.timestamp) }}</div>
         <button type="button" :disabled="drilling" @click="drillExtreme('high')"><span>跳到最高价那一秒</span><b class="up">{{ formatTickerPrice(contextMenu.bar.high) }}</b></button>
         <button type="button" :disabled="drilling" @click="drillExtreme('low')"><span>跳到最低价那一秒</span><b class="down">{{ formatTickerPrice(contextMenu.bar.low) }}</b></button>
+        <button type="button" @click="copyCurrentUrl"><span>复制 URL</span></button>
       </div>
     </div>
     <footer><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint foot-log" :class="{ active: footLog, error: footLogError }" :title="footLog">{{ footLog || 'WebSocket stream' }}</span></footer>
@@ -173,10 +174,9 @@ export default {
     // crosshair moves also refresh the URL time anchor (debounced).
     this.chart.subscribeAction(ActionType.OnCrosshairChange, (data) => {
       this.crosshairBar = data?.kLineData || null;
-      if (data?.kLineData?.timestamp) this.scheduleUrlTimeSync();
     });
     // Dragging back through history keeps the URL anchored to what is displayed.
-    this.chart.subscribeAction(ActionType.OnVisibleRangeChange, () => this.scheduleUrlTimeSync());
+    this.chart.subscribeAction(ActionType.OnVisibleRangeChange, () => this.scheduleUrlTimeSync(true));
     this.chart.setLoadDataCallback(({ type, data, callback }) => {
       const list = this.chart.getDataList();
       if (type === 'forward') {
@@ -578,12 +578,14 @@ export default {
     syncUrlTime(timestamp) {
       if (!Number.isFinite(timestamp)) return;
       this.urlTime = timestamp;
+      console.log('[realtime-chart] syncUrlTime', { timestamp, pageUrl: this.pageUrl() });
       history.replaceState({ symbol: this.symbol, interval: this.interval, time: timestamp }, '', this.pageUrl());
     },
-    scheduleUrlTimeSync() {
+    scheduleUrlTimeSync(force = false) {
       clearTimeout(this.urlSyncTimer);
       this.urlSyncTimer = setTimeout(() => {
         if (this.drilling) return;
+        if (!force && Number.isFinite(this.crosshairBar?.timestamp)) return;
         let timestamp = this.crosshairBar?.timestamp;
         if (!Number.isFinite(timestamp)) {
           // No crosshair (dragging history): anchor to the rightmost visible bar so the view restores when reopening.
@@ -594,6 +596,34 @@ export default {
         }
         if (Number.isFinite(timestamp)) this.syncUrlTime(timestamp);
       }, 400);
+    },
+    centerOnTimestamp(timestamp) {
+      if (!this.chart || !Number.isFinite(timestamp)) return;
+      const list = this.chart.getDataList ? this.chart.getDataList() : this.bars || [];
+      const index = list.findIndex((item) => item.timestamp === timestamp);
+      const visibleRange = this.chart.getVisibleRange ? this.chart.getVisibleRange() : { from: 0, to: list.length - 1 };
+      const visibleCount = Math.max(1, Number(visibleRange.to) - Number(visibleRange.from) + 1);
+      const targetIndex = Number.isInteger(index) && index >= 0 ? index : 0;
+      const rightEdgeIndex = Math.min(list.length - 1, Math.max(0, targetIndex + Math.ceil(visibleCount / 2)));
+      console.log('[realtime-chart] centerOnTimestamp:calc', {
+        timestamp,
+        index: targetIndex,
+        visibleRange,
+        visibleCount,
+        rightEdgeIndex,
+        total: list.length,
+      });
+      if (typeof this.chart.scrollToDataIndex === 'function') {
+        this.chart.scrollToDataIndex(rightEdgeIndex, 0);
+      }
+      const after = this.chart.convertToPixel ? this.chart.convertToPixel({ timestamp }, { paneId: 'candle_pane' }) : null;
+      const viewportCenter = this.chart.getVisibleRange && this.chart.getVisibleRange();
+      console.log('[realtime-chart] centerOnTimestamp:end', {
+        timestamp,
+        afterX: after && after.x,
+        visibleRangeAfter: viewportCenter,
+        offset: after && Number.isFinite(after.x) ? after.x - (this.$refs.chart ? this.$refs.chart.clientWidth / 2 : 0) : null,
+      });
     },
     locateAfterReady(timestamp) {
       // applyNewData indexes asynchronously: scroll only once the data is ready, otherwise
@@ -608,7 +638,7 @@ export default {
         clearTimeout(fallback);
         this.chart.unsubscribeAction(ActionType.OnDataReady, doLocate);
         if (this.chartGeneration !== gen) return;
-        this.chart.scrollToTimestamp(timestamp, 0);
+        this.centerOnTimestamp(timestamp);
         const pixel = this.chart.convertToPixel({ timestamp }, { paneId: 'candle_pane' });
         if (pixel && Number.isFinite(pixel.x)) {
           // Draws the crosshair line at the anchor; note: executeAction does NOT re-dispatch
@@ -617,7 +647,6 @@ export default {
         }
         const anchorBar = this.chart.getDataList().find((item) => item.timestamp === timestamp) || null;
         this.crosshairBar = anchorBar;
-        this.syncUrlTime(timestamp);
       };
       fallback = setTimeout(doLocate, 500);
       this.chart.subscribeAction(ActionType.OnDataReady, doLocate);
@@ -655,7 +684,6 @@ export default {
         this.updateAxisMode();
         this.locateAfterReady(timestamp);
         this.focusTarget = 0;
-        this.syncUrlTime(timestamp);
         this.setFootLog(`已定位到 ${this.formatTime(timestamp)}（URL time 锚点 · ${this.interval}，左右拖动可连续加载历史）`, false);
       }).catch((error) => {
         console.error('[realtime-chart] focus-window-error', error);
@@ -759,10 +787,20 @@ export default {
     },
     onChartContextMenu(event) {
       const bar = this.crosshairBar;
+      console.log('[realtime-chart] contextmenu-open', {
+        clientX: event?.clientX,
+        clientY: event?.clientY,
+        timestamp: bar?.timestamp,
+        symbol: this.symbol,
+        interval: this.interval,
+        urlTime: this.urlTime,
+        visibleRange: this.chart?.getVisibleRange?.(),
+      });
       if (this.drilling || !bar || !Number.isFinite(bar.timestamp)) {
         this.contextMenu = null;
         return;
       }
+      this.syncUrlTime(bar.timestamp);
       this.contextMenu = {
         x: Math.min(event.clientX, window.innerWidth - 250),
         y: Math.min(event.clientY, window.innerHeight - 130),
@@ -770,6 +808,33 @@ export default {
       };
     },
     closeContextMenu() { this.contextMenu = null; },
+    async copyCurrentUrl() {
+      const bar = this.contextMenu?.bar || this.crosshairBar;
+      const timestamp = Number.isFinite(bar?.timestamp) ? bar.timestamp : this.urlTime;
+      console.log('[realtime-chart] copy-url-click', { timestamp, urlTime: this.urlTime, pageUrl: this.pageUrl() });
+      if (Number.isFinite(timestamp)) this.syncUrlTime(timestamp);
+      const shareUrl = new URL(this.pageUrl(), window.location.origin).toString();
+      this.contextMenu = null;
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(shareUrl);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = shareUrl;
+          textarea.setAttribute('readonly', '');
+          textarea.style.position = 'fixed';
+          textarea.style.left = '-9999px';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+        }
+        this.setFootLog(`已复制当前 K 线链接：${shareUrl}`, false);
+      } catch (error) {
+        console.error('[realtime-chart] copy-url-error', error);
+        this.setFootLog('复制 URL 失败', true);
+      }
+    },
     drillExtreme(side) {
       const bar = this.contextMenu?.bar;
       this.contextMenu = null;
@@ -834,8 +899,7 @@ export default {
         this.locateAfterReady(target.timestamp);
         this.drillTarget = null;
         this.focusTarget = 0;
-        this.syncUrlTime(target.timestamp);
-        this.setFootLog(`已定位到 1s ${target.side === 'high' ? '最高' : '最低'}价 ${this.formatTickerPrice(target.price)} · ${this.formatTime(target.timestamp)}（服务端钻取 ${target.levels} 层，地址栏 time 已同步，可复制分享）`, false);
+        this.setFootLog(`已定位到 1s ${target.side === 'high' ? '最高' : '最低'}价 ${this.formatTickerPrice(target.price)} · ${this.formatTime(target.timestamp)}（服务端钻取 ${target.levels} 层，可手动右键复制分享链接）`, false);
       }).catch((error) => {
         console.error('[realtime-chart] drill-window-error', error);
         this.drillTarget = null;
