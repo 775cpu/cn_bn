@@ -96,7 +96,7 @@ export default {
       loadingTickers: false, showTickerPanel: false, showSymbolMenu: false,
       crosshairBar: null, contextMenu: null, drilling: false, drillTarget: null,
       // URL time anchor (ms): shared deep link to a specific bar; focusTarget is one-shot after each snapshot
-      urlTime: Number(window.__INITIAL_TIME__) || 0, focusTarget: Number(window.__INITIAL_TIME__) || 0, urlSyncTimer: null,
+      urlTime: Number(window.__INITIAL_TIME__) || 0, focusTarget: Number(window.__INITIAL_TIME__) || 0, urlSyncTimer: null, urlSyncLockUntil: 0,
       tickerSortKey: 'pct', tickerSortDesc: true,
       tickerSortOptions: [
         { key: 'pct', label: '涨跌幅', hint: '按 24h 涨跌幅绝对值排序（再点切换正/倒序）' },
@@ -162,7 +162,11 @@ export default {
     changeClass() { return this.lastBar.close >= this.lastBar.open ? 'up' : 'down'; },
   },
   mounted() {
-    this.log('mounted', { symbol: this.symbol, interval: this.interval, url: location.href });
+    this.urlTime = Number(window.__INITIAL_TIME__) || this.urlTime || 0;
+    if (this.urlTime) {
+      this.updateDocumentTitle();
+    }
+    this.log('mounted', { symbol: this.symbol, interval: this.interval, url: location.href, initialTime: this.urlTime });
     this.chart = init(this.$refs.chart);
     this.chart.setTimezone('Asia/Shanghai');
     this.chart.setStyles({ grid: { horizontal: { color: '#263238' }, vertical: { color: '#263238' } }, candle: { type: 'candle_solid', bar: { upColor: '#35c99a', downColor: '#ef6b73', noChangeColor: '#9aa6ab' } } });
@@ -175,8 +179,26 @@ export default {
     this.chart.subscribeAction(ActionType.OnCrosshairChange, (data) => {
       this.crosshairBar = data?.kLineData || null;
     });
-    // Dragging back through history keeps the URL anchored to what is displayed.
-    this.chart.subscribeAction(ActionType.OnVisibleRangeChange, () => this.scheduleUrlTimeSync(true));
+    this.chart.subscribeAction(ActionType.OnScroll, ({ distance }) => {
+      if (!Number.isFinite(distance) || !distance || this.drilling || this.locating) return;
+      if (Date.now() < this.urlSyncLockUntil) {
+        console.log('[realtime-chart] user-scroll-edge-sync:locked', { distance, urlSyncLockUntil: this.urlSyncLockUntil, now: Date.now() });
+        return;
+      }
+      const range = this.chart?.getVisibleRange?.();
+      const list = this.chart?.getDataList?.() || this.bars || [];
+      if (!list.length || !range) return;
+      const atLeft = Number(range.from) <= 1;
+      const atRight = Number(range.to) >= list.length - 2;
+      const reason = atLeft ? 'left-edge' : atRight ? 'right-edge' : 'middle';
+      if (!atLeft && !atRight) return;
+      const idx = atRight ? Math.min(Math.max(Number(range.to), 0), list.length - 1) : Math.min(Math.max(Number(range.from), 0), list.length - 1);
+      const timestamp = list[idx]?.timestamp;
+      if (Number.isFinite(timestamp)) {
+        console.log('[realtime-chart] user-scroll-edge-sync', { distance, range, timestamp, atLeft, atRight, reason, idx, total: list.length });
+        this.syncUrlTime(timestamp, true);
+      }
+    });
     this.chart.setLoadDataCallback(({ type, data, callback }) => {
       const list = this.chart.getDataList();
       if (type === 'forward') {
@@ -561,6 +583,21 @@ export default {
         this.setFootLog(error.message || String(error), true);
       });
     },
+    shortSymbol(symbol = this.symbol) {
+      const value = String(symbol || '').trim().toUpperCase();
+      if (!value) return '—';
+      return value.replace(/USDT$|USDC$|BUSD$|BTC$|ETH$|BNB$/i, '').trim() || value;
+    },
+    updateDocumentTitle() {
+      const timestamp = Number.isFinite(this.urlTime) && this.urlTime > 0 ? this.urlTime : Date.now();
+      const readableTime = new Date(timestamp).toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+        hour12: false,
+      }).replace(/\//g, '-').replace(/\s+/g, ' ');
+      document.title = `${this.shortSymbol(this.symbol)} ${this.interval} ${readableTime}`;
+    },
     pageUrl() {
       let url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}'`;
       if (this.urlTime) url += `,time=${this.urlTime}`;
@@ -568,6 +605,7 @@ export default {
     },
     subscribe() {
       history.replaceState({ symbol: this.symbol, interval: this.interval, time: this.urlTime || null }, '', this.pageUrl());
+      this.updateDocumentTitle();
       this.log('subscribe', { symbol: this.symbol, interval: this.interval, urlTime: this.urlTime });
       if (this.socket?.readyState === WebSocket.OPEN) {
         // Re-anchor the view to the URL time after interval/symbol switch (drill flow sets drillTarget instead).
@@ -575,11 +613,24 @@ export default {
         this.socket.send(JSON.stringify({ type: 'subscribe', symbol: this.symbol, interval: this.interval }));
       }
     },
-    syncUrlTime(timestamp) {
+    syncUrlTime(timestamp, pushHistory = false) {
       if (!Number.isFinite(timestamp)) return;
+      const nextUrl = this.pageUrl();
+      const currentUrl = `${location.pathname}${location.search}`;
+      if (this.urlTime === timestamp && currentUrl === nextUrl) {
+        console.log('[realtime-chart] syncUrlTime:skip-equal', { timestamp, currentUrl, nextUrl, pushHistory });
+        this.updateDocumentTitle();
+        return;
+      }
       this.urlTime = timestamp;
-      console.log('[realtime-chart] syncUrlTime', { timestamp, pageUrl: this.pageUrl() });
-      history.replaceState({ symbol: this.symbol, interval: this.interval, time: timestamp }, '', this.pageUrl());
+      console.log('[realtime-chart] syncUrlTime', { timestamp, pushHistory, currentUrl, nextUrl, symbol: this.symbol, interval: this.interval });
+      const state = { symbol: this.symbol, interval: this.interval, time: timestamp };
+      this.updateDocumentTitle();
+      if (pushHistory) {
+        history.pushState(state, document.title, nextUrl);
+      } else {
+        history.replaceState(state, document.title, nextUrl);
+      }
     },
     scheduleUrlTimeSync(force = false) {
       clearTimeout(this.urlSyncTimer);
@@ -601,28 +652,37 @@ export default {
       if (!this.chart || !Number.isFinite(timestamp)) return;
       const list = this.chart.getDataList ? this.chart.getDataList() : this.bars || [];
       const index = list.findIndex((item) => item.timestamp === timestamp);
-      const visibleRange = this.chart.getVisibleRange ? this.chart.getVisibleRange() : { from: 0, to: list.length - 1 };
-      const visibleCount = Math.max(1, Number(visibleRange.to) - Number(visibleRange.from) + 1);
-      const targetIndex = Number.isInteger(index) && index >= 0 ? index : 0;
-      const rightEdgeIndex = Math.min(list.length - 1, Math.max(0, targetIndex + Math.ceil(visibleCount / 2)));
+      const targetPixel = this.chart.convertToPixel ? this.chart.convertToPixel({ timestamp }, { paneId: 'candle_pane' }) : null;
+      const viewportWidth = this.$refs.chart ? this.$refs.chart.clientWidth : 0;
+      const viewportCenter = viewportWidth / 2;
+      const targetX = targetPixel && Number.isFinite(targetPixel.x) ? targetPixel.x : null;
+      const delta = targetX != null && Number.isFinite(viewportCenter) ? viewportCenter - targetX : 0;
       console.log('[realtime-chart] centerOnTimestamp:calc', {
         timestamp,
-        index: targetIndex,
-        visibleRange,
-        visibleCount,
-        rightEdgeIndex,
+        index,
+        targetX,
+        viewportCenter,
+        delta,
+        visibleRange: this.chart.getVisibleRange ? this.chart.getVisibleRange() : null,
         total: list.length,
       });
-      if (typeof this.chart.scrollToDataIndex === 'function') {
-        this.chart.scrollToDataIndex(rightEdgeIndex, 0);
+      this.locating = true;
+      this.urlSyncLockUntil = Date.now() + 2000;
+      if (targetX != null && Math.abs(delta) > 1 && typeof this.chart.scrollByDistance === 'function') {
+        this.chart.scrollByDistance(delta, 0);
+      } else if (typeof this.chart.scrollToTimestamp === 'function') {
+        this.chart.scrollToTimestamp(timestamp, 0);
       }
+      setTimeout(() => {
+        this.locating = false;
+      }, 120);
       const after = this.chart.convertToPixel ? this.chart.convertToPixel({ timestamp }, { paneId: 'candle_pane' }) : null;
-      const viewportCenter = this.chart.getVisibleRange && this.chart.getVisibleRange();
       console.log('[realtime-chart] centerOnTimestamp:end', {
         timestamp,
         afterX: after && after.x,
-        visibleRangeAfter: viewportCenter,
-        offset: after && Number.isFinite(after.x) ? after.x - (this.$refs.chart ? this.$refs.chart.clientWidth / 2 : 0) : null,
+        viewportCenter,
+        offset: after && Number.isFinite(after.x) ? after.x - viewportCenter : null,
+        visibleRangeAfter: this.chart.getVisibleRange ? this.chart.getVisibleRange() : null,
       });
     },
     locateAfterReady(timestamp) {
@@ -800,7 +860,7 @@ export default {
         this.contextMenu = null;
         return;
       }
-      this.syncUrlTime(bar.timestamp);
+      this.syncUrlTime(bar.timestamp, true);
       this.contextMenu = {
         x: Math.min(event.clientX, window.innerWidth - 250),
         y: Math.min(event.clientY, window.innerHeight - 130),
@@ -812,7 +872,7 @@ export default {
       const bar = this.contextMenu?.bar || this.crosshairBar;
       const timestamp = Number.isFinite(bar?.timestamp) ? bar.timestamp : this.urlTime;
       console.log('[realtime-chart] copy-url-click', { timestamp, urlTime: this.urlTime, pageUrl: this.pageUrl() });
-      if (Number.isFinite(timestamp)) this.syncUrlTime(timestamp);
+      if (Number.isFinite(timestamp)) this.syncUrlTime(timestamp, true);
       const shareUrl = new URL(this.pageUrl(), window.location.origin).toString();
       this.contextMenu = null;
       try {
