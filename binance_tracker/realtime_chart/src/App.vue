@@ -1,59 +1,50 @@
 <template>
   <main class="terminal">
-    <header class="toolbar">
-      <div class="brand"></div>
-      <div class="quote"><strong>{{ symbol }}</strong><span>{{ lastPrice }}</span><span :class="changeClass">{{ changeText }}</span></div>
-      <div class="controls">
-        <label class="symbol-add">
-          <input v-model.trim="newSymbol" placeholder="订阅 SYMBOL" :disabled="addingSymbol" spellcheck="false" autocomplete="off"
-                 @keydown.enter="addSymbol()" @keydown.esc="closePanels" @focus="openTickerPanel">
-          <button class="add-button" type="button" :disabled="addingSymbol || !newSymbol" title="订阅新 symbol：自动订阅 WS 并校准 K 线" @click="addSymbol()">{{ addingSymbol ? '…' : '＋' }}</button>
-        </label>
-        <label class="symbol-picker">SYMBOL
-          <div class="symbol-menu">
-            <button type="button" class="symbol-menu-button" :title="'已订阅 ' + symbols.length + ' 个：点击切换，× 取消订阅'" @click.stop="toggleSymbolMenu">
-              <span class="symbol-menu-current">{{ symbol || '—' }}</span><span class="caret">▾</span>
-            </button>
-            <div v-if="showSymbolMenu" class="symbol-menu-panel">
-              <div v-for="item in symbols" :key="item" class="symbol-menu-row" :class="{ active: item === symbol }">
-                <span class="symbol-menu-name" @click="switchSymbol(item)">{{ item }}</span>
-                <button type="button" class="symbol-remove" :title="'取消订阅 ' + item" @click.stop="removeSymbol(item)">×</button>
-              </div>
-              <div v-if="!symbols.length" class="symbol-menu-empty">暂无订阅，在左侧输入框添加</div>
-            </div>
-          </div>
-        </label>
-        <label>INTERVAL <select v-model="interval" @change="subscribe"><option v-for="item in intervals" :key="item" :value="item">{{ item }}</option></select></label>
-        <button class="icon-button" title="切换全屏" @click="toggleFullscreen">⛶</button>
-      </div>
-    </header>
+    <ChartHeader
+      v-model:newSymbol="newSymbol"
+      :symbol="symbol"
+      :last-price="lastPrice"
+      :change-text="changeText"
+      :change-class="changeClass"
+      :adding-symbol="addingSymbol"
+      :symbols="symbols"
+      :interval="interval"
+      :intervals="intervals"
+      :show-symbol-menu="showSymbolMenu"
+      @add-symbol="addSymbol()"
+      @open-ticker-panel="openTickerPanel"
+      @close-panels="closePanels"
+      @toggle-symbol-menu="toggleSymbolMenu"
+      @switch-symbol="switchSymbol"
+      @remove-symbol="removeSymbol"
+      @interval-change="handleIntervalChange"
+      @toggle-fullscreen="toggleFullscreen"
+    />
+
     <div v-if="showTickerPanel || showSymbolMenu" class="pop-overlay" @click="closePanels"></div>
-    <section v-if="showTickerPanel" class="ticker-panel">
-      <header class="ticker-panel-head">
-        <span class="tsb-label">组内排序</span>
-        <button v-for="opt in tickerSortOptions" :key="opt.key" type="button" class="ticker-sort-btn"
-                :class="{ active: tickerSortKey === opt.key }" :title="opt.hint" @click="setTickerSort(opt.key)">
-          {{ opt.label }}<i v-if="tickerSortKey === opt.key">{{ tickerSortDesc ? '▼' : '▲' }}</i>
-        </button>
-        <span class="ticker-panel-hint">{{ tickers.length }} 个交易对<template v-if="newSymbol"> · 筛选 {{ filteredTickers.length }} 个</template> · 点击行订阅/切换，已订阅为绿色{{ loadingTickers ? ' · 行情加载中…' : tickerAgeText ? ' · ' + tickerAgeText : '' }}</span>
-        <button type="button" class="ticker-panel-close" title="关闭" @click="closePanels">×</button>
-      </header>
-      <div class="ticker-grid">
-        <template v-for="group in groupedTickers" :key="group.quote">
-          <div class="ticker-group-head">{{ group.quote }}<span class="tgh-count">{{ group.items.length }}</span></div>
-          <button v-for="item in group.shown" :key="item.symbol" type="button" class="ticker-cell"
-                  :class="{ subscribed: symbols.includes(item.symbol) }" :title="cellTitle(item)" @click="pickTicker(item)">
-            <span class="tc-symbol">{{ item.symbol }}</span>
-            <span class="tc-price">{{ formatTickerPrice(item.lastPrice) }}</span>
-            <span class="tc-pct" :class="item.priceChangePercent >= 0 ? 'up' : 'down'">{{ formatPct(item.priceChangePercent) }}</span>
-          </button>
-        </template>
-        <div v-if="newSymbol.trim() && !groupedTickers.length" class="ticker-empty">
-          「{{ newSymbol.trim() }}」无匹配交易对 —— 检查拼写；已下架/未上市/非现货的币不会出现在列表中
-        </div>
-      </div>
-      <footer v-if="tickerHiddenTotal > 0" class="ticker-panel-foot">部分组别仅显示涨跌幅最活跃的前 {{ tickerGroupCap }} 个（{{ tickerHiddenTotal }} 个已折叠），在输入框键入 symbol 可精确筛选</footer>
-    </section>
+
+    <TickerPanel
+      v-if="showTickerPanel"
+      :new-symbol="newSymbol"
+      :loading-tickers="loadingTickers"
+      :ticker-age-text="tickerAgeText"
+      :grouped-tickers="groupedTickers"
+      :ticker-hidden-total="tickerHiddenTotal"
+      :ticker-group-cap="tickerGroupCap"
+      :symbols="symbols"
+      :tickers="tickers"
+      :filtered-tickers="filteredTickers"
+      :ticker-sort-options="tickerSortOptions"
+      :ticker-sort-key="tickerSortKey"
+      :ticker-sort-desc="tickerSortDesc"
+      :cell-title="cellTitle"
+      :format-ticker-price="formatTickerPrice"
+      :format-pct="formatPct"
+      @close-panel="closePanels"
+      @set-sort="setTickerSort"
+      @pick-ticker="pickTicker"
+    />
+
     <div class="status"><i :class="{ online: connected }"></i>{{ connected ? 'LIVE' : 'CONNECTING' }}</div>
     <div class="chart-wrap" @contextmenu.prevent="onChartContextMenu">
       <div ref="chart" class="chart"></div>
@@ -66,14 +57,30 @@
         <button type="button" @click="copyCurrentUrl"><span>复制 URL</span></button>
       </div>
     </div>
-    <footer><span>{{ barCount }} bars</span><span>延迟 {{ latency }}</span><span>服务器 {{ serverTime }}</span><span>{{ lastTime }}</span><span class="hint foot-log" :class="{ active: footLog, error: footLogError }" :title="footLog">{{ footLog || 'WebSocket stream' }}</span></footer>
+
+    <ChartFooter
+      :bar-count="barCount"
+      :latency="latency"
+      :server-time="serverTime"
+      :last-time="lastTime"
+      :foot-log="footLog"
+      :foot-log-error="footLogError"
+    />
   </main>
 </template>
 
 <script>
 import { ActionType, dispose, init } from 'klinecharts';
+import ChartHeader from './components/ChartHeader.vue';
+import TickerPanel from './components/TickerPanel.vue';
+import ChartFooter from './components/ChartFooter.vue';
 
 export default {
+  components: {
+    ChartHeader,
+    TickerPanel,
+    ChartFooter,
+  },
   name: 'RealtimeChart',
   data() {
     return {
@@ -602,6 +609,10 @@ export default {
       let url = `/chart_page(p,symbol='${encodeURIComponent(this.symbol)}',interval='${encodeURIComponent(this.interval)}'`;
       if (this.urlTime) url += `,time=${this.urlTime}`;
       return `${url})`;
+    },
+    handleIntervalChange(value) {
+      this.interval = value;
+      this.subscribe();
     },
     subscribe() {
       history.replaceState({ symbol: this.symbol, interval: this.interval, time: this.urlTime || null }, '', this.pageUrl());
