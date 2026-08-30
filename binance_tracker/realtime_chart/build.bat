@@ -37,9 +37,9 @@ if errorlevel 1 (
 
 echo.
 echo [OK] build finished: dist\index.html
-if /i not "%~1"=="nopause" pause
+REM if /i not "%~1"=="nopause" pause
 exit /b 0
 
 :fail
-if /i not "%~1"=="nopause" pause
+REM if /i not "%~1"=="nopause" pause
 exit /b 1

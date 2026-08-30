@@ -61,12 +61,12 @@
       <div v-if="contextMenu" class="ctx-overlay" @click="closeContextMenu" @contextmenu.prevent="closeContextMenu"></div>
       <div v-if="contextMenu" class="ctx-menu" :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }" @click.stop @contextmenu.prevent>
         <div class="ctx-title">{{ symbol }} · {{ interval }} · {{ contextMenu.bar.timestamp }} · {{ formatTime(contextMenu.bar.timestamp) }}</div>
-        <button type="button" :disabled="drilling" @click="drillExtreme('high')"><span>跳到最高价那一秒</span><b class="up">{{ formatTickerPrice(contextMenu.bar.high) }}</b></button>
-        <button type="button" :disabled="drilling" @click="drillExtreme('low')"><span>跳到最低价那一秒</span><b class="down">{{ formatTickerPrice(contextMenu.bar.low) }}</b></button>
+        <button type="button" :disabled="drilling" @click="drillExtreme('high')"><span>跳最高价秒</span><b class="up">{{ formatTickerPrice(contextMenu.bar.high) }}</b></button>
+        <button type="button" :disabled="drilling" @click="drillExtreme('low')"><span>跳最低价秒</span><b class="down">{{ formatTickerPrice(contextMenu.bar.low) }}</b></button>
         <button type="button" @click="copyCurrentUrl"><span>复制 URL</span></button>
       </div>
     </div>
-    <footer><span>{{ barCount }} bars</span><span>{{ lastTime }}</span><span>服务器 {{ serverTime }}</span><span>延迟 {{ latency }}</span><span class="hint foot-log" :class="{ active: footLog, error: footLogError }" :title="footLog">{{ footLog || 'WebSocket stream' }}</span></footer>
+    <footer><span>{{ barCount }} bars</span><span>延迟 {{ latency }}</span><span>服务器 {{ serverTime }}</span><span>{{ lastTime }}</span><span class="hint foot-log" :class="{ active: footLog, error: footLogError }" :title="footLog">{{ footLog || 'WebSocket stream' }}</span></footer>
   </main>
 </template>
 
