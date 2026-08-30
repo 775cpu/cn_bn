@@ -751,20 +751,67 @@ export default {
         this.setFootLog('时间锚点定位失败: ' + (error.message || error), true);
       });
     },
+
+    // 核心修复逻辑：在更新缩放模式时，强制遍历图表重置 y 轴锁定状态，并通知重绘
     updateAxisMode() {
       if (!this.chart) return;
+      
       this.chart.setPriceVolumePrecision(this.pricePrecision, 2);
-      if (this.autoScale && !this.scaleLocked) this.chart.adjustPaneViewport(true, true, true, true, true);
-      this.chart.resize();
+      
+      console.log(`[realtime-chart] 📊 updateAxisMode triggered | autoScale: ${this.autoScale} | scaleLocked: ${this.scaleLocked}`);
+
+      try {
+        if (this.autoScale && !this.scaleLocked) {
+          // 1. 获取所有绘制面板 (DrawPanes)
+          const panes = typeof this.chart.getAllDrawPanes === 'function' ? this.chart.getAllDrawPanes() : [];
+          console.log(`[realtime-chart] 🔍 遍历 ${panes.length} 个 DrawPanes 寻找 Y 轴以解除锁定...`);
+
+          panes.forEach((pane) => {
+            // 2. 尝试获取该面板的 Y 轴组件 (兼容不同底层属性)
+            const yAxis = typeof pane.getAxisComponent === 'function' ? pane.getAxisComponent() : pane._axis;
+            
+            // 3. 强行重置自动计算标志位
+            if (yAxis && yAxis._autoCalcTickFlag !== undefined) {
+              const oldFlag = yAxis._autoCalcTickFlag;
+              const range = typeof yAxis.getRange === 'function' ? yAxis.getRange() : 'unknown';
+              
+              // 【核心修复】模拟库内双击 Y 轴的内部行为，释放 Y 轴尺度控制权
+              yAxis._autoCalcTickFlag = true;
+              
+              console.log(`[realtime-chart] ✅ 面板 [${pane.getId ? pane.getId() : 'unknown'}] Y轴已释放 | _autoCalcTickFlag: ${oldFlag} -> true | 冻结前的 Range:`, range);
+            }
+          });
+          
+          if (typeof this.chart.adjustPaneViewport === 'function') {
+            this.chart.adjustPaneViewport(true, true, true, true, true);
+          }
+        }
+
+        if (typeof this.chart.resize === 'function') {
+          this.chart.resize(); 
+        }
+        
+      } catch (err) {
+        console.error('[realtime-chart] ❌ updateAxisMode 发生运行时异常:', err);
+      }
+      
       this.log('axis-updated', { autoScale: this.autoScale, scaleLocked: this.scaleLocked, pricePrecision: this.pricePrecision });
     },
+
     toggleAutoScale() {
       this.autoScale = !this.autoScale;
       if (this.autoScale) this.scaleLocked = false;
       this.log('auto-scale-click', { autoScale: this.autoScale });
       this.updateAxisMode();
     },
-    toggleScaleLock() { this.scaleLocked = !this.scaleLocked; if (this.scaleLocked) this.autoScale = false; this.log('scale-lock-click', { scaleLocked: this.scaleLocked }); this.updateAxisMode(); },
+
+    toggleScaleLock() {
+      this.scaleLocked = !this.scaleLocked;
+      if (this.scaleLocked) this.autoScale = false;
+      this.log('scale-lock-click', { scaleLocked: this.scaleLocked });
+      this.updateAxisMode();
+    },
+
     connect() {
       const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const query = new URLSearchParams({ symbol: this.symbol, interval: this.interval });
